@@ -87,26 +87,32 @@ app.use((0, helmet_1.default)({
     },
 }));
 app.use((0, morgan_1.default)('combined'));
-// Handle preflight OPTIONS requests manually to ensure private network header is included
+// Handle preflight OPTIONS requests FIRST - before CORS middleware
 app.options('*', (_req, res) => {
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.status(200).end();
+    res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+    res.status(204).end(); // 204 No Content for OPTIONS
 });
-// Add header to allow private network access for all requests
+// Add header to allow private network access for ALL requests (including preflight)
 app.use((_req, res, next) => {
     // Allow private network access for browsers that support it
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
     next();
 });
-// CORS configuration
+// CORS configuration - must come AFTER manual OPTIONS handler
+// Note: Cannot use '*' with credentials: true, so we'll handle origin dynamically
 const corsOptions = {
-    origin: '*',
+    origin: (_origin, callback) => {
+        // Allow all origins (including null for same-origin requests)
+        callback(null, true);
+    },
     credentials: true,
     optionsSuccessStatus: 200,
+    // Don't handle OPTIONS here since we handle it manually above
+    preflightContinue: false,
 };
 app.use((0, cors_1.default)(corsOptions));
 // Rate limiting
