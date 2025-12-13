@@ -1,0 +1,261 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
+import path from 'path';
+import fs from 'fs';
+import connectDB from './config/database';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+import { Server } from 'socket.io';
+import http from 'http';
+import { ErrorHandler } from './types';
+
+// Import routes
+import tokenRoutes from './routes/tokens';
+import holderRoutes from './routes/holders';
+import historyRoutes from './routes/histories';
+import transactionRoutes from './routes/transactions';
+import userRoutes from './routes/users';
+import authRoutes from './routes/auth';
+import uploadRoutes from './routes/upload';
+import analyticsRoutes from './routes/analytics';
+import chatRoutes from './routes/chat';
+import testSendGridRoutes from './routes/test-sendgrid';
+import debugAuthRoutes from './routes/debug-auth';
+import tokenCreationRoutes from './routes/tokenCreation';
+import liquidityEventRoutes from './routes/liquidityEvents';
+import walletRoutes from './routes/wallet';
+
+// Import sync job
+import { trackTrading } from './sync/track';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: [
+        "'self'",
+        "'unsafe-inline'", // Required for some libraries
+        "'unsafe-eval'", // Required for some Web3 libraries
+        "https://*.walletconnect.org",
+        "https://*.walletconnect.com",
+        "https://*.web3modal.org",
+      ],
+      styleSrc: [
+        "'self'",
+        "'unsafe-inline'", // Required for inline styles
+      ],
+      imgSrc: [
+        "'self'",
+        "data:",
+        "https:", // Allow all HTTPS images (Cloudinary, etc.)
+        "blob:",
+      ],
+      connectSrc: [
+        "'self'",
+        "https://*.walletconnect.org",
+        "https://*.walletconnect.com",
+        "https://*.web3modal.org",
+        "https://pulse.walletconnect.org",
+        "https://api.web3modal.org",
+        "wss://*.walletconnect.org",
+        "wss://*.walletconnect.com",
+        "https://*.coinbase.com", // Base Account SDK / Coinbase Cloud Account
+        "https://cca-lite.coinbase.com", // Base Account SDK analytics and AMP
+      ],
+      fontSrc: [
+        "'self'",
+        "data:",
+        "https:",
+      ],
+      frameSrc: [
+        "'self'",
+        "https://*.walletconnect.org",
+        "https://*.walletconnect.com",
+      ],
+    },
+  },
+  crossOriginOpenerPolicy: {
+    policy: "unsafe-none", // Required for Base Account SDK
+  },
+}));
+app.use(morgan('combined'));
+
+// Handle preflight OPTIONS requests FIRST - before CORS middleware
+app.options('*', (_req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+  res.status(204).end(); // 204 No Content for OPTIONS
+});
+
+// Add header to allow private network access for ALL requests (including preflight)
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  // Allow private network access for browsers that support it
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  next();
+});
+
+// CORS configuration - must come AFTER manual OPTIONS handler
+// Note: Cannot use '*' with credentials: true, so we'll handle origin dynamically
+const corsOptions: cors.CorsOptions = {
+  origin: (_origin, callback) => {
+    // Allow all origins (including null for same-origin requests)
+    callback(null, true);
+  },
+  credentials: true,
+  optionsSuccessStatus: 200,
+  // Don't handle OPTIONS here since we handle it manually above
+  preflightContinue: false,
+};
+app.use(cors(corsOptions));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '10000'),
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api/', limiter);
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Serve static files from frontend build
+// Resolve path relative to project root (works in both dev and production)
+const projectRoot = path.resolve(__dirname, '../..');
+const buildPath = path.join(projectRoot, 'backend', 'src', 'build');
+
+// Fallback: if build doesn't exist, try dist/build (for compiled backend)
+const actualBuildPath = fs.existsSync(buildPath) 
+  ? buildPath 
+  : path.join(__dirname, 'build');
+
+app.use(express.static(actualBuildPath));
+
+// Health check endpoint
+app.get('/health', (_req: Request, res: Response): void => {
+  res.status(200).json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
+// API routes
+app.use('/api/tokens', tokenRoutes);
+app.use('/api/tokens', tokenCreationRoutes);
+app.use('/api/holders', holderRoutes);
+app.use('/api/histories', historyRoutes);
+app.use('/api/transactions', transactionRoutes);
+app.use('/api/liquidity-events', liquidityEventRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/test', testSendGridRoutes);
+app.use('/api/wallet', walletRoutes);
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/debug', debugAuthRoutes);
+}
+
+// Serve frontend for all non-API routes (SPA routing)
+app.get('*', (req: Request, res: Response): Response | void => {
+  // Don't serve frontend for API routes
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'Route not found' });
+  }
+  
+  // Serve index.html for SPA routing
+  res.sendFile(path.join(actualBuildPath, 'index.html'));
+});
+
+// Global error handler
+app.use((err: ErrorHandler, _req: Request, res: Response, _next: NextFunction): void => {
+  console.error('Global error:', err);
+  res.status(err.status || err.statusCode || 500).json({
+    error: err.message || 'Internal server error',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
+  });
+});
+
+// Create HTTP server and attach Socket.io
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  // Allow both WebSocket and polling transports
+  transports: ['websocket', 'polling'],
+  // Increase timeouts for better reliability
+  connectTimeout: 45000,
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  // Allow EIO3 clients
+  allowEIO3: true,
+  // Path configuration (default is /socket.io/)
+  path: '/socket.io/',
+});
+
+// Initialize Socket logic
+import socketInit from './socket';
+socketInit(io);
+
+// Connect to MongoDB and start server
+const startServer = async (): Promise<void> => {
+  try {
+    await connectDB();
+
+    // Start server
+    server.listen(PORT, () => {
+      console.log(`🚀 BondX Backend Server running on port ${PORT}`);
+      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+    });
+    
+    // Start multi-chain tracking (will track all configured chains)
+    // trackTrading() will automatically detect and track all chains with WebSocket URLs configured
+    trackTrading();
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+// Graceful shutdown
+const shutdown = (): void => {
+  console.log('Shutting down gracefully...');
+  if (mongoose.connection.readyState === 1) {
+    mongoose.connection.close(false).then(() => {
+      console.log('MongoDB connection closed');
+      process.exit(0);
+    }).catch((err) => {
+      console.error('Error closing MongoDB connection:', err);
+      process.exit(1);
+    });
+  } else {
+    process.exit(0);
+  }
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+export default app;
+

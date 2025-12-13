@@ -1,1 +1,1 @@
-{"version":3,"file":"ChatMessage.d.ts","sourceRoot":"","sources":["../../../src/models/ChatMessage.ts"],"names":[],"mappings":"AAAA,OAAiB,EAAU,KAAK,EAAE,MAAM,UAAU,CAAC;AACnD,OAAO,EAAE,YAAY,EAAE,MAAM,UAAU,CAAC;AAyCxC,QAAA,MAAM,WAAW,EAAE,KAAK,CAAC,YAAY,CAAkE,CAAC;AAExG,eAAe,WAAW,CAAC"}
+{"version":3,"file":"ChatMessage.d.ts","sourceRoot":"","sources":["../../src/models/ChatMessage.ts"],"names":[],"mappings":"AAAA,OAAiB,EAAU,KAAK,EAAE,MAAM,UAAU,CAAC;AACnD,OAAO,EAAE,YAAY,EAAE,MAAM,UAAU,CAAC;AAyCxC,QAAA,MAAM,WAAW,EAAE,KAAK,CAAC,YAAY,CAAkE,CAAC;AAExG,eAAe,WAAW,CAAC"}
