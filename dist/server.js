@@ -184,16 +184,16 @@ const io = new socket_io_1.Server(server, {
         methods: ['GET', 'POST'],
         credentials: true,
     },
-    // Allow both WebSocket and polling transports
     transports: ['websocket', 'polling'],
     // Increase timeouts for better reliability
-    connectTimeout: 45000,
-    pingTimeout: 60000,
-    pingInterval: 25000,
-    // Allow EIO3 clients
+    connectTimeout: 60000, // Increased from 45000
+    pingTimeout: 120000, // Increased from 60000 (2 minutes)
+    pingInterval: 25000, // Keep at 25 seconds
     allowEIO3: true,
-    // Path configuration (default is /socket.io/)
     path: '/socket.io/',
+    // Add these for better connection handling
+    allowUpgrades: true,
+    perMessageDeflate: false, // Disable compression to reduce overhead
 });
 // Initialize Socket logic
 const socket_1 = __importDefault(require("./socket"));
