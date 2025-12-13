@@ -40,6 +40,10 @@ const track_1 = require("./sync/track");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 5000;
+// Trust proxy - required when behind reverse proxy (nginx, load balancer, etc.)
+// This tells Express to trust the X-Forwarded-* headers from the proxy
+// This is necessary for express-rate-limit to correctly identify client IPs
+app.set('trust proxy', true);
 // Middleware
 app.use((0, helmet_1.default)({
     contentSecurityPolicy: {
@@ -123,7 +127,7 @@ app.use((0, cors_1.default)(corsOptions));
 // Rate limiting
 const limiter = (0, express_rate_limit_1.default)({
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
-    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '10000'),
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000000'),
     message: { error: 'Too many requests, please try again later.' },
 });
 app.use('/api/', limiter);
@@ -175,8 +179,17 @@ app.get('*', (req, res) => {
     if (req.path.startsWith('/api')) {
         return res.status(404).json({ error: 'Route not found' });
     }
+    // Check if index.html exists
+    const indexPath = path_1.default.join(actualBuildPath, 'index.html');
+    if (!fs_1.default.existsSync(indexPath)) {
+        console.error(`❌ index.html not found at: ${indexPath}`);
+        return res.status(500).json({
+            error: 'Frontend build not found. Please build the frontend first.',
+            path: indexPath
+        });
+    }
     // Serve index.html for SPA routing
-    res.sendFile(path_1.default.join(actualBuildPath, 'index.html'));
+    res.sendFile(indexPath);
 });
 // Global error handler
 app.use((err, _req, res, _next) => {
