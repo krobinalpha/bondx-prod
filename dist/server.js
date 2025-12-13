@@ -43,7 +43,7 @@ const PORT = process.env.PORT || 5000;
 // Trust proxy - required when behind reverse proxy (nginx, load balancer, etc.)
 // This tells Express to trust the X-Forwarded-* headers from the proxy
 // This is necessary for express-rate-limit to correctly identify client IPs
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 // Middleware
 app.use((0, helmet_1.default)({
     contentSecurityPolicy: {
@@ -126,7 +126,7 @@ const corsOptions = {
 app.use((0, cors_1.default)(corsOptions));
 // Rate limiting
 const limiter = (0, express_rate_limit_1.default)({
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '600000'),
     max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000000'),
     message: { error: 'Too many requests, please try again later.' },
 });

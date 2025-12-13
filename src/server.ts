@@ -45,7 +45,7 @@ const PORT = process.env.PORT || 5000;
 // Trust proxy - required when behind reverse proxy (nginx, load balancer, etc.)
 // This tells Express to trust the X-Forwarded-* headers from the proxy
 // This is necessary for express-rate-limit to correctly identify client IPs
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 
 // Middleware
 app.use(helmet({
