@@ -129,6 +129,10 @@ const limiter = (0, express_rate_limit_1.default)({
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '600000'),
     max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000000'),
     message: { error: 'Too many requests, please try again later.' },
+    // Disable trust proxy validation to avoid ERR_ERL_PERMISSIVE_TRUST_PROXY
+    validate: {
+        trustProxy: false,
+    },
 });
 app.use('/api/', limiter);
 // Body parsing middleware

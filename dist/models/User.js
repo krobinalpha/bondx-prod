@@ -193,8 +193,8 @@ const userSchema = new mongoose_1.Schema({
     toObject: { virtuals: true }
 });
 // Indexes for better query performance
-userSchema.index({ username: 1 });
-userSchema.index({ email: 1 });
+// Note: username and email indexes are automatically created by unique: true
+// Only define indexes that are NOT already created by unique/required
 userSchema.index({ 'walletAddresses.address': 1 });
 userSchema.index({ 'walletAddresses.isSmartWallet': 1 }, { sparse: true });
 userSchema.index({ isVerified: 1 }, { sparse: true });
