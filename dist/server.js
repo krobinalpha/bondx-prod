@@ -180,10 +180,20 @@ app.use((err, _req, res, _next) => {
 const server = http_1.default.createServer(app);
 const io = new socket_io_1.Server(server, {
     cors: {
-        // origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
         origin: '*',
         methods: ['GET', 'POST'],
+        credentials: true,
     },
+    // Allow both WebSocket and polling transports
+    transports: ['websocket', 'polling'],
+    // Increase timeouts for better reliability
+    connectTimeout: 45000,
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    // Allow EIO3 clients
+    allowEIO3: true,
+    // Path configuration (default is /socket.io/)
+    path: '/socket.io/',
 });
 // Initialize Socket logic
 const socket_1 = __importDefault(require("./socket"));
