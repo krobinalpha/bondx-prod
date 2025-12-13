@@ -8,7 +8,7 @@ const connectDB = async () => {
     try {
         // Use existing database name (BondX) to match what's already in MongoDB
         // If you want to use lowercase, rename the database first
-        const defaultURI = 'mongodb://localhost:27017/bondx';
+        const defaultURI = 'mongodb://localhost:27017/bondx_prod';
         const mongoURI = process.env.MONGODB_URI || defaultURI;
         // Connect without normalization to use existing database
         // If you get case errors, either:
