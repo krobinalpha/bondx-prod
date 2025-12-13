@@ -2,11 +2,13 @@ import express, { Request, Response } from 'express';
 import { body, query, param, validationResult } from 'express-validator';
 import { ethers } from 'ethers';
 import Token from '../models/Token';
+import TokenHolder from '../models/TokenHolder';
 import Transaction from '../models/Transaction';
 import { authenticateToken } from '../middleware/auth';
 import { validateAddress } from '../middleware/validation';
 import { AuthRequest } from '../types';
-import { getContract, getProvider } from '../config/blockchain';
+import { getContract, getProvider, getFactoryAddressForChain } from '../config/blockchain';
+import { recalculatePercentages } from '../sync/handler';
 import TokenABI from '../config/abi/Token.json';
 
 const router = express.Router();
@@ -459,6 +461,42 @@ router.patch('/updateToken', [
       });
 
       console.log(`Created new token record: ${normalizedAddress}`);
+      
+      // ✅ CREATE HOLDER SYNCHRONOUSLY BEFORE SENDING RESPONSE
+      // This ensures holder exists when frontend redirects
+      try {
+        const bondingCurveAddress = getFactoryAddressForChain(token.chainId)?.toLowerCase();
+        const totalSupply = token.totalSupply || '0';
+        
+        if (bondingCurveAddress && totalSupply && totalSupply !== '0') {
+          // Check if holder already exists
+          const existingHolder = await TokenHolder.findOne({
+            tokenId: token._id,
+            holderAddress: bondingCurveAddress,
+            chainId: token.chainId
+          });
+          
+          if (!existingHolder) {
+            await TokenHolder.create({
+              tokenId: token._id,
+              tokenAddress: normalizedAddress,
+              holderAddress: bondingCurveAddress,
+              balance: totalSupply,
+              firstTransactionHash: '',
+              lastTransactionHash: '',
+              transactionCount: 0,
+              chainId: token.chainId
+            });
+            console.log(`✅ Initial bonding curve holder created via updateToken API: ${bondingCurveAddress}`);
+            
+            // Recalculate percentages
+            await recalculatePercentages(normalizedAddress, totalSupply, token.chainId);
+          }
+        }
+      } catch (holderError: any) {
+        // Log but don't fail - WebSocket event handler will create it as fallback
+        console.warn('⚠️ Could not create holder via updateToken API (will be created by event handler):', holderError.message);
+      }
     } else {
       // Token exists - update it with new data
       // Only update fields that are provided and not undefined
@@ -697,21 +735,52 @@ router.get('/address/:address/user-balance', [
     const targetChainId = chainId ? parseInt(chainId as string) : parseInt(process.env.CHAIN_ID || '84532');
 
     try {
+      // Check if token exists in database first
+      const token = await Token.findOne({ 
+        address: tokenAddress.toLowerCase(),
+        chainId: targetChainId 
+      });
+
       // Get provider for this chain
       const chainProvider = getProvider(targetChainId);
       
       // Get ETH balance
       const ethBalance = await chainProvider.getBalance(userAddress as string);
 
-      // Get token balance
-      const tokenContract = new ethers.Contract(tokenAddress, TokenABI, chainProvider);
-      const tokenBalance = await tokenContract.balanceOf(userAddress as string);
+      // Get token balance - with error handling for invalid contracts
+      let tokenBalance = 0n;
+      let tokenBalanceFormatted = '0';
+      
+      try {
+        // Check if contract exists by trying to get code
+        const code = await chainProvider.getCode(tokenAddress);
+        if (code === '0x' || !code) {
+          // Contract doesn't exist at this address
+          // Only warn if token exists in DB (unexpected) or in development
+          if (token || process.env.NODE_ENV === 'development') {
+            console.warn(`⚠️ No contract found at address ${tokenAddress} on chain ${targetChainId}${token ? ' (token exists in DB)' : ''}`);
+          }
+        } else {
+          // Contract exists, try to call balanceOf
+          const tokenContract = new ethers.Contract(tokenAddress, TokenABI, chainProvider);
+          tokenBalance = await tokenContract.balanceOf(userAddress as string);
+          tokenBalanceFormatted = ethers.formatUnits(tokenBalance, 18);
+        }
+      } catch (balanceError: any) {
+        // If balanceOf fails, return 0 balance
+        // Only log error if token exists in DB (unexpected failure)
+        if (token) {
+          console.warn(`⚠️ Failed to get token balance for ${tokenAddress}:`, balanceError.message);
+        }
+        tokenBalance = 0n;
+        tokenBalanceFormatted = '0';
+      }
 
       res.json({
         ethBalance: ethBalance.toString(),
         ethBalanceFormatted: ethers.formatUnits(ethBalance, 18),
         tokenBalance: tokenBalance.toString(),
-        tokenBalanceFormatted: ethers.formatUnits(tokenBalance, 18)
+        tokenBalanceFormatted: tokenBalanceFormatted
       });
     } catch (contractError: any) {
       console.error('Error reading balances from contract:', contractError);

@@ -22,8 +22,14 @@ import authRoutes from './routes/auth';
 import uploadRoutes from './routes/upload';
 import analyticsRoutes from './routes/analytics';
 import chatRoutes from './routes/chat';
-import testSendGridRoutes from './routes/test-sendgrid';
-import debugAuthRoutes from './routes/debug-auth';
+// Debug/test routes - only in development
+let testSendGridRoutes: express.Router | null = null;
+let debugAuthRoutes: express.Router | null = null;
+
+if (process.env.NODE_ENV !== 'production') {
+  testSendGridRoutes = require('./routes/test-sendgrid').default;
+  debugAuthRoutes = require('./routes/debug-auth').default;
+}
 import tokenCreationRoutes from './routes/tokenCreation';
 import liquidityEventRoutes from './routes/liquidityEvents';
 import walletRoutes from './routes/wallet';
@@ -165,10 +171,15 @@ app.use('/api/auth', authRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/chat', chatRoutes);
-app.use('/api/test', testSendGridRoutes);
 app.use('/api/wallet', walletRoutes);
+// Debug/test routes - only in development
 if (process.env.NODE_ENV !== 'production') {
-  app.use('/api/debug', debugAuthRoutes);
+  if (testSendGridRoutes) {
+    app.use('/api/test', testSendGridRoutes);
+  }
+  if (debugAuthRoutes) {
+    app.use('/api/debug', debugAuthRoutes);
+  }
 }
 
 // Serve frontend for all non-API routes (SPA routing)

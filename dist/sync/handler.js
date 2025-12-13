@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.syncBlockRange = exports.saveCreatedEvent = exports.saveTradeEvent = void 0;
+exports.syncBlockRange = exports.saveCreatedEvent = exports.saveTradeEvent = exports.recalculatePercentages = void 0;
 const ethers_1 = require("ethers");
 const Transaction_1 = __importDefault(require("../models/Transaction"));
 const TokenHistory_1 = __importDefault(require("../models/TokenHistory"));
@@ -11,6 +11,22 @@ const Token_1 = __importDefault(require("../models/Token"));
 const TokenHolder_1 = __importDefault(require("../models/TokenHolder"));
 const blockchain_1 = require("../config/blockchain");
 const updateEmitter_1 = require("../socket/updateEmitter");
+// Helper function to validate and normalize price
+const validatePrice = (price, context = '') => {
+    if (!price)
+        return '0';
+    const priceStr = String(price);
+    const priceValue = parseFloat(priceStr);
+    // Validate price is reasonable (should be < 1000 ETH per token)
+    if (!isFinite(priceValue) || priceValue < 0 || priceValue > 1000) {
+        console.error(`❌ Invalid price detected ${context}:`, {
+            price: priceStr,
+            priceValue,
+        });
+        return '0';
+    }
+    return priceStr;
+};
 // Helper function to update or create a holder record
 const updateOrCreateHolder = async (tokenId, tokenAddress, holderAddress, balance, txHash, chainId, isFirstTransaction) => {
     try {
@@ -79,13 +95,23 @@ const recalculatePercentages = async (tokenAddress, totalSupply, chainId) => {
         console.error(`❌ Error recalculating percentages for ${tokenAddress}:`, error.message);
     }
 };
+exports.recalculatePercentages = recalculatePercentages;
 // Define your callback function for handling the events
 const saveTradeEvent = async (eventData, priceData) => {
     try {
         const chainId = eventData.chainId || priceData?.chainId || parseInt(process.env.CHAIN_ID || '1');
+        // Validate required fields
+        if (!eventData.txHash) {
+            console.error('❌ saveTradeEvent: txHash is missing in eventData:', eventData);
+            return;
+        }
+        if (!eventData.tokenAddress) {
+            console.error('❌ saveTradeEvent: tokenAddress is missing in eventData:', eventData);
+            return;
+        }
         // Check if the transaction already exists in the database by txHash + chainId
         const existingTx = await Transaction_1.default.findOne({
-            txHash: eventData.txHash.toLowerCase(),
+            txHash: (eventData.txHash || '').toLowerCase(),
             chainId: chainId
         });
         // Lookup token to get tokenId
@@ -117,9 +143,9 @@ const saveTradeEvent = async (eventData, priceData) => {
         if (!existingTx) {
             const transactionData = {
                 ...eventData,
-                txHash: eventData.txHash.toLowerCase(),
+                txHash: eventData.txHash?.toLowerCase() || '',
                 tokenId: token._id,
-                tokenAddress: eventData.tokenAddress.toLowerCase(),
+                tokenAddress: eventData.tokenAddress?.toLowerCase() || '',
                 chainId: chainId,
                 blockTimestamp: eventData.blockTimestamp || new Date(),
                 tokenPrice: priceData?.tokenPrice ? String(priceData.tokenPrice) : '0', // Include tokenPrice from priceData
@@ -151,8 +177,11 @@ const saveTradeEvent = async (eventData, priceData) => {
                 };
                 await TokenHistory_1.default.create(historyData);
                 console.log('✅ Price history saved', historyData.tokenAddress);
-                // Update Token's currentPrice with the latest price
-                token.currentPrice = String(priceData.tokenPrice || '0');
+                // Update Token's currentPrice with the validated price
+                const validatedPrice = validatePrice(priceData.tokenPrice, 'in saveTradeEvent (new history)');
+                if (validatedPrice !== '0') {
+                    token.currentPrice = validatedPrice;
+                }
                 // Calculate and update marketCap if totalSupply is available
                 // currentPrice is stored as decimal string (e.g., "0.000008"), need to convert to wei first
                 if (token.totalSupply && token.currentPrice && token.currentPrice !== '0') {
@@ -175,7 +204,10 @@ const saveTradeEvent = async (eventData, priceData) => {
             else {
                 // Even if price history exists, update Token's currentPrice if it's newer
                 if (priceData.tokenPrice) {
-                    token.currentPrice = String(priceData.tokenPrice);
+                    const validatedPrice = validatePrice(priceData.tokenPrice, 'in saveTradeEvent (existing history - trade)');
+                    if (validatedPrice !== '0') {
+                        token.currentPrice = validatedPrice;
+                    }
                     // Calculate and update marketCap if totalSupply is available
                     // currentPrice is stored as decimal string (e.g., "0.000008"), need to convert to wei first
                     if (token.totalSupply && token.currentPrice && token.currentPrice !== '0') {
@@ -274,7 +306,7 @@ const saveTradeEvent = async (eventData, priceData) => {
                 console.log(`✅ Holders updated for TokenSold: seller ${sellerAddress} -${tokenAmount}`);
             }
             // Recalculate percentages for all holders
-            await recalculatePercentages(tokenAddress, token.totalSupply || '0', chainId);
+            await (0, exports.recalculatePercentages)(tokenAddress, token.totalSupply || '0', chainId);
         }
         catch (holderError) {
             console.error('❌ Error updating holders:', holderError.message);
@@ -313,33 +345,53 @@ const saveTradeEvent = async (eventData, priceData) => {
             });
         }
         // Always emit comprehensive event with transaction, holder, and token data
+        // Ensure we have valid txHash before emitting
+        if (!eventData.txHash) {
+            console.error('❌ Cannot emit WebSocket event: txHash is missing', {
+                eventData,
+                tokenAddress,
+            });
+            return;
+        }
         if (eventData.type === 'Bought') {
+            console.log('🔍 Emitting tokenBought event:', {
+                tokenAddress,
+                txHash: eventData.txHash,
+                buyer: eventData.recipientAddress,
+            });
             (0, updateEmitter_1.emitTokenBought)({
                 tokenAddress: tokenAddress,
                 buyer: eventData.recipientAddress?.toLowerCase() || '',
                 ethAmount: eventData.ethAmount?.toString() || '0',
                 tokenAmount: eventData.tokenAmount?.toString() || '0',
-                txHash: eventData.txHash || '',
+                txHash: eventData.txHash,
                 blockNumber: eventData.blockNumber || 0,
                 blockTimestamp: eventData.blockTimestamp || new Date(),
                 chainId: chainId,
                 tokenPrice: tokenPrice,
                 marketCap: token.marketCap || '0',
+                graduationProgress: token.graduationProgress || '0',
                 holders: formattedHolders,
             });
         }
         else if (eventData.type === 'Sold') {
+            console.log('🔍 Emitting tokenSold event:', {
+                tokenAddress,
+                txHash: eventData.txHash,
+                seller: eventData.senderAddress,
+            });
             (0, updateEmitter_1.emitTokenSold)({
                 tokenAddress: tokenAddress,
                 seller: eventData.senderAddress?.toLowerCase() || '',
                 ethAmount: eventData.ethAmount?.toString() || '0',
                 tokenAmount: eventData.tokenAmount?.toString() || '0',
-                txHash: eventData.txHash || '',
+                txHash: eventData.txHash,
                 blockNumber: eventData.blockNumber || 0,
                 blockTimestamp: eventData.blockTimestamp || new Date(),
                 chainId: chainId,
                 tokenPrice: tokenPrice,
                 marketCap: token.marketCap || '0',
+                graduationProgress: token.graduationProgress || '0',
                 holders: formattedHolders,
             });
         }
@@ -395,28 +447,15 @@ const saveCreatedEvent = async (eventData, priceData) => {
             }
             console.log(`ℹ️ Token already exists:`, eventData?.address?.toLowerCase(), `on chain ${chainId}`);
         }
-        // Save price history if it doesn't exist
+        // Update Token's currentPrice and marketCap (for display) but DON'T save to TokenHistory
+        // Price history should only be saved on buy/sell events, not on token creation
         if (priceData && token) {
-            const existingPrice = await TokenHistory_1.default.findOne({
-                tokenAddress: priceData.tokenAddress?.toLowerCase(),
-                chainId: chainId,
-                timestamp: priceData.timestamp
-            });
-            if (!existingPrice) {
-                const historyData = {
-                    ...priceData,
-                    tokenId: token._id,
-                    tokenAddress: priceData.tokenAddress?.toLowerCase(),
-                    tokenPrice: String(priceData.tokenPrice || '0'),
-                    priceUSD: String(priceData.priceUSD || '0'),
-                    chainId: chainId,
-                };
-                const savedHistory = await TokenHistory_1.default.create(historyData);
-                console.log(`✅ Price history saved for token:`, priceData?.tokenAddress?.toLowerCase());
-                // Update Token's currentPrice with the initial price
-                token.currentPrice = String(priceData.tokenPrice || '0');
+            // Validate price before updating token
+            const tokenPrice = String(priceData.tokenPrice || '0');
+            const validatedPrice = validatePrice(tokenPrice, 'in saveCreatedEvent (initial price)');
+            if (validatedPrice !== '0') {
+                token.currentPrice = validatedPrice;
                 // Calculate and update marketCap if totalSupply is available
-                // currentPrice is stored as decimal string (e.g., "0.000008"), need to convert to wei first
                 if (token.totalSupply && token.currentPrice && token.currentPrice !== '0') {
                     try {
                         const supply = BigInt(token.totalSupply);
@@ -432,161 +471,90 @@ const saveCreatedEvent = async (eventData, priceData) => {
                     }
                 }
                 await token.save();
-                console.log('✅ Token currentPrice set on creation:', token.currentPrice);
-                // Create initial holder record for bonding curve contract
-                try {
-                    const tokenAddress = priceData.tokenAddress?.toLowerCase();
-                    const chainId = priceData.chainId || parseInt(process.env.CHAIN_ID || '1');
-                    const bondingCurveAddress = (0, blockchain_1.getFactoryAddressForChain)(chainId)?.toLowerCase();
-                    const totalSupply = token.totalSupply || '0';
-                    if (bondingCurveAddress && totalSupply && totalSupply !== '0') {
-                        // Check if holder already exists (might exist from previous sync)
-                        const existingBondingCurveHolder = await TokenHolder_1.default.findOne({
+                console.log('✅ Token currentPrice set on creation (no history saved):', token.currentPrice);
+            }
+            // Create initial holder record for bonding curve contract
+            try {
+                const tokenAddress = priceData.tokenAddress?.toLowerCase();
+                const chainId = priceData.chainId || parseInt(process.env.CHAIN_ID || '1');
+                const bondingCurveAddress = (0, blockchain_1.getFactoryAddressForChain)(chainId)?.toLowerCase();
+                const totalSupply = token.totalSupply || '0';
+                if (bondingCurveAddress && totalSupply && totalSupply !== '0') {
+                    // Check if holder already exists (might exist from previous sync)
+                    const existingBondingCurveHolder = await TokenHolder_1.default.findOne({
+                        tokenId: token._id,
+                        holderAddress: bondingCurveAddress,
+                        chainId: chainId
+                    });
+                    if (!existingBondingCurveHolder) {
+                        // Create holder record for bonding curve with totalSupply
+                        await TokenHolder_1.default.create({
                             tokenId: token._id,
+                            tokenAddress: tokenAddress,
                             holderAddress: bondingCurveAddress,
+                            balance: totalSupply,
+                            firstTransactionHash: '', // Will be set on first trade
+                            lastTransactionHash: '',
+                            transactionCount: 0,
                             chainId: chainId
                         });
-                        if (!existingBondingCurveHolder) {
-                            // Create holder record for bonding curve with totalSupply
-                            await TokenHolder_1.default.create({
-                                tokenId: token._id,
-                                tokenAddress: tokenAddress,
-                                holderAddress: bondingCurveAddress,
-                                balance: totalSupply,
-                                firstTransactionHash: '', // Will be set on first trade
-                                lastTransactionHash: '',
-                                transactionCount: 0,
-                                chainId: chainId
-                            });
-                            console.log(`✅ Initial bonding curve holder created: ${bondingCurveAddress} balance: ${totalSupply}`);
-                        }
-                        else {
-                            // Update existing holder with totalSupply if it's higher
-                            const existingBalance = BigInt(existingBondingCurveHolder.balance || '0');
-                            const newBalance = BigInt(totalSupply);
-                            if (newBalance > existingBalance) {
-                                existingBondingCurveHolder.balance = totalSupply;
-                                await existingBondingCurveHolder.save();
-                                console.log(`✅ Bonding curve holder updated: ${bondingCurveAddress} balance: ${totalSupply}`);
-                            }
-                        }
-                        // Recalculate percentages
-                        await recalculatePercentages(tokenAddress, totalSupply, chainId);
+                        console.log(`✅ Initial bonding curve holder created: ${bondingCurveAddress} balance: ${totalSupply}`);
                     }
-                }
-                catch (holderError) {
-                    console.error('❌ Error creating initial holder:', holderError.message);
-                    // Don't throw - continue with WebSocket emission even if holder creation fails
-                }
-                // Fetch holders for WebSocket emission
-                let holders = [];
-                try {
-                    holders = await TokenHolder_1.default.find({
-                        tokenAddress: priceData.tokenAddress?.toLowerCase(),
-                        chainId: chainId
-                    })
-                        .select('holderAddress balance balanceUSD percentage')
-                        .sort({ balance: -1 })
-                        .lean();
-                }
-                catch (err) {
-                    console.warn('⚠️ Could not fetch holders for WebSocket emission:', err);
-                }
-                // Transform holders to match frontend format
-                const formattedHolders = (holders || []).map((holder) => ({
-                    owner_address: holder.holderAddress,
-                    balance: holder.balance,
-                    balanceUSD: holder.balanceUSD || '0',
-                    percentage: holder.percentage || 0
-                }));
-                // Emit price update (for chart)
-                (0, updateEmitter_1.emitTokenPriceUpdate)(priceData.tokenAddress?.toLowerCase() || '', {
-                    price: String(priceData.tokenPrice || '0'),
-                    timestamp: savedHistory.timestamp || new Date(),
-                    chainId: chainId,
-                });
-                // Emit comprehensive tokenCreated event with token and holder data
-                (0, updateEmitter_1.emitTokenCreated)({
-                    tokenAddress: priceData.tokenAddress?.toLowerCase() || '',
-                    creatorAddress: eventData?.creatorAddress?.toLowerCase() || '',
-                    name: eventData?.name || '',
-                    symbol: eventData?.symbol || '',
-                    description: eventData?.description || '',
-                    logo: eventData?.logo || '/chats/noimg.svg',
-                    totalSupply: token.totalSupply || '0',
-                    chainId: chainId,
-                    tokenPrice: priceData.tokenPrice || '0',
-                    marketCap: token.marketCap || '0',
-                    holders: formattedHolders,
-                    timestamp: priceData.timestamp || new Date(),
-                });
-            }
-            else {
-                // Even if price history exists, update Token's currentPrice if it's newer
-                if (priceData.tokenPrice) {
-                    token.currentPrice = String(priceData.tokenPrice);
-                    // Calculate and update marketCap if totalSupply is available
-                    // currentPrice is stored as decimal string (e.g., "0.000008"), need to convert to wei first
-                    if (token.totalSupply && token.totalSupply !== '0' && token.currentPrice && token.currentPrice !== '0') {
-                        try {
-                            const supply = BigInt(token.totalSupply);
-                            // Convert decimal price string to wei (BigInt)
-                            const priceInWei = ethers_1.ethers.parseUnits(token.currentPrice, 18);
-                            // marketCap = totalSupply * priceInWei / 10^18 (to get result in wei)
-                            const marketCap = (supply * priceInWei) / (10n ** 18n);
-                            token.marketCap = marketCap.toString();
-                            console.log('✅ Token marketCap updated (from existing history):', token.marketCap);
-                        }
-                        catch (err) {
-                            console.warn('⚠️ Could not calculate marketCap:', err);
+                    else {
+                        // Update existing holder with totalSupply if it's higher
+                        const existingBalance = BigInt(existingBondingCurveHolder.balance || '0');
+                        const newBalance = BigInt(totalSupply);
+                        if (newBalance > existingBalance) {
+                            existingBondingCurveHolder.balance = totalSupply;
+                            await existingBondingCurveHolder.save();
+                            console.log(`✅ Bonding curve holder updated: ${bondingCurveAddress} balance: ${totalSupply}`);
                         }
                     }
-                    await token.save();
-                    console.log('✅ Token currentPrice updated (from existing history):', token.currentPrice);
-                    // Fetch holders for WebSocket emission
-                    let holders = [];
-                    try {
-                        holders = await TokenHolder_1.default.find({
-                            tokenAddress: priceData.tokenAddress?.toLowerCase(),
-                            chainId: chainId
-                        })
-                            .select('holderAddress balance balanceUSD percentage')
-                            .sort({ balance: -1 })
-                            .lean();
-                    }
-                    catch (err) {
-                        console.warn('⚠️ Could not fetch holders for WebSocket emission:', err);
-                    }
-                    // Transform holders to match frontend format
-                    const formattedHolders = (holders || []).map((holder) => ({
-                        owner_address: holder.holderAddress,
-                        balance: holder.balance,
-                        balanceUSD: holder.balanceUSD || '0',
-                        percentage: holder.percentage || 0
-                    }));
-                    // Emit price update (for chart)
-                    (0, updateEmitter_1.emitTokenPriceUpdate)(priceData.tokenAddress?.toLowerCase() || '', {
-                        price: String(priceData.tokenPrice || '0'),
-                        timestamp: priceData.timestamp || new Date(),
-                        chainId: chainId,
-                    });
-                    // Emit comprehensive tokenCreated event with token and holder data
-                    (0, updateEmitter_1.emitTokenCreated)({
-                        tokenAddress: priceData.tokenAddress?.toLowerCase() || '',
-                        creatorAddress: eventData?.creatorAddress?.toLowerCase() || '',
-                        name: eventData?.name || '',
-                        symbol: eventData?.symbol || '',
-                        description: eventData?.description || '',
-                        logo: eventData?.logo || '/chats/noimg.svg',
-                        totalSupply: token.totalSupply || '0',
-                        chainId: chainId,
-                        tokenPrice: priceData.tokenPrice || '0',
-                        marketCap: token.marketCap || '0',
-                        holders: formattedHolders,
-                        timestamp: priceData.timestamp || new Date(),
-                    });
+                    // Recalculate percentages
+                    await (0, exports.recalculatePercentages)(tokenAddress, totalSupply, chainId);
                 }
             }
+            catch (holderError) {
+                console.error('❌ Error creating initial holder:', holderError.message);
+                // Don't throw - continue with WebSocket emission even if holder creation fails
+            }
+            // Fetch holders for WebSocket emission
+            let holders = [];
+            try {
+                holders = await TokenHolder_1.default.find({
+                    tokenAddress: priceData.tokenAddress?.toLowerCase(),
+                    chainId: chainId
+                })
+                    .select('holderAddress balance balanceUSD percentage')
+                    .sort({ balance: -1 })
+                    .lean();
+            }
+            catch (err) {
+                console.warn('⚠️ Could not fetch holders for WebSocket emission:', err);
+            }
+            // Transform holders to match frontend format
+            const formattedHolders = (holders || []).map((holder) => ({
+                owner_address: holder.holderAddress,
+                balance: holder.balance,
+                balanceUSD: holder.balanceUSD || '0',
+                percentage: holder.percentage || 0
+            }));
+            // Emit comprehensive tokenCreated event with token and holder data
+            // NOTE: We don't emit priceUpdate here since no price history is saved on creation
+            (0, updateEmitter_1.emitTokenCreated)({
+                tokenAddress: priceData.tokenAddress?.toLowerCase() || '',
+                creatorAddress: eventData?.creatorAddress?.toLowerCase() || '',
+                name: eventData?.name || '',
+                symbol: eventData?.symbol || '',
+                description: eventData?.description || '',
+                logo: eventData?.logo || '/chats/noimg.svg',
+                totalSupply: token.totalSupply || '0',
+                chainId: chainId,
+                tokenPrice: validatedPrice || priceData.tokenPrice || '0',
+                marketCap: token.marketCap || '0',
+                holders: formattedHolders,
+                timestamp: priceData.timestamp || new Date(),
+            });
         }
     }
     catch (error) {
@@ -660,7 +628,27 @@ const syncBlockRange = async (start, end, chainId) => {
                 const block = await chainProvider.getBlock(decodedEvent.blockNumber);
                 const blockNumber = block?.number;
                 const timestamp = block?.timestamp ? new Date(Number(block.timestamp) * 1000) : new Date();
-                const tokenPrice = ethers_1.ethers.formatUnits((ethers_1.ethers.toBigInt(decodedEvent.args[6]) * 10n ** 18n) / ethers_1.ethers.toBigInt(decodedEvent.args[7]), 18);
+                // Calculate price: (newVirtualEthReserves * 1e18) / newVirtualTokenReserves
+                // args[6] = newVirtualEthReserves, args[7] = newVirtualTokenReserves
+                const virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[6]);
+                const virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                let tokenPrice = '0';
+                if (virtualTokenReserves > 0n && virtualEthReserves > 0n) {
+                    const priceInWei = (virtualEthReserves * 10n ** 18n) / virtualTokenReserves;
+                    tokenPrice = ethers_1.ethers.formatUnits(priceInWei, 18);
+                    // Validate price is reasonable (should be < 1000 ETH per token)
+                    const priceValue = parseFloat(tokenPrice);
+                    if (!isFinite(priceValue) || priceValue < 0 || priceValue > 1000) {
+                        console.error('❌ Invalid price calculated in syncBlockRange (Bought):', {
+                            price: tokenPrice,
+                            priceValue,
+                            virtualEthReserves: virtualEthReserves.toString(),
+                            virtualTokenReserves: virtualTokenReserves.toString(),
+                            tokenAddress: decodedEvent.args[0],
+                        });
+                        tokenPrice = '0'; // Skip invalid price
+                    }
+                }
                 const eventData = {
                     txHash: decodedEvent.transactionHash,
                     tokenAddress: decodedEvent.args[0],
@@ -700,7 +688,27 @@ const syncBlockRange = async (start, end, chainId) => {
                 const block = await chainProvider.getBlock(decodedEvent.blockNumber);
                 const blockNumber = block?.number;
                 const timestamp = block?.timestamp ? new Date(Number(block.timestamp) * 1000) : new Date();
-                const tokenPrice = ethers_1.ethers.formatUnits((ethers_1.ethers.toBigInt(decodedEvent.args[6]) * 10n ** 18n) / ethers_1.ethers.toBigInt(decodedEvent.args[7]), 18);
+                // Calculate price: (newVirtualEthReserves * 1e18) / newVirtualTokenReserves
+                // args[6] = newVirtualEthReserves, args[7] = newVirtualTokenReserves
+                const virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[6]);
+                const virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                let tokenPrice = '0';
+                if (virtualTokenReserves > 0n && virtualEthReserves > 0n) {
+                    const priceInWei = (virtualEthReserves * 10n ** 18n) / virtualTokenReserves;
+                    tokenPrice = ethers_1.ethers.formatUnits(priceInWei, 18);
+                    // Validate price is reasonable (should be < 1000 ETH per token)
+                    const priceValue = parseFloat(tokenPrice);
+                    if (!isFinite(priceValue) || priceValue < 0 || priceValue > 1000) {
+                        console.error('❌ Invalid price calculated in syncBlockRange (Sold):', {
+                            price: tokenPrice,
+                            priceValue,
+                            virtualEthReserves: virtualEthReserves.toString(),
+                            virtualTokenReserves: virtualTokenReserves.toString(),
+                            tokenAddress: decodedEvent.args[0],
+                        });
+                        tokenPrice = '0'; // Skip invalid price
+                    }
+                }
                 const eventData = {
                     txHash: decodedEvent.transactionHash,
                     tokenAddress: decodedEvent.args[0],

@@ -6,7 +6,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const auth_1 = require("../middleware/auth");
 const Token_1 = __importDefault(require("../models/Token"));
+const TokenHolder_1 = __importDefault(require("../models/TokenHolder"));
 const ethers_1 = require("ethers");
+const blockchain_1 = require("../config/blockchain");
+const handler_1 = require("../sync/handler");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 const router = express_1.default.Router();
@@ -278,8 +281,9 @@ router.post('/create-with-embedded-wallet', auth_1.authenticateToken, async (req
                 }
             }
             // Update token in database with price and market cap immediately
+            let token;
             try {
-                const token = await Token_1.default.findOne({
+                token = await Token_1.default.findOne({
                     address: tokenAddress.toLowerCase(),
                     chainId: chainId
                 });
@@ -298,7 +302,7 @@ router.post('/create-with-embedded-wallet', auth_1.authenticateToken, async (req
                 }
                 else {
                     // Token doesn't exist yet - create it with price/market cap
-                    await Token_1.default.create({
+                    token = await Token_1.default.create({
                         address: tokenAddress.toLowerCase(),
                         name: name,
                         symbol: symbol,
@@ -320,6 +324,42 @@ router.post('/create-with-embedded-wallet', auth_1.authenticateToken, async (req
                 // Don't fail the request if DB update fails - WebSocket event will handle it
                 console.warn('⚠️ Could not update token in database immediately:', dbError.message);
             }
+            // ✅ CREATE HOLDER SYNCHRONOUSLY BEFORE SENDING RESPONSE
+            // This ensures holder exists when frontend redirects
+            if (token) {
+                try {
+                    const bondingCurveAddress = (0, blockchain_1.getFactoryAddressForChain)(chainId)?.toLowerCase();
+                    const tokenTotalSupply = token.totalSupply || '0';
+                    if (bondingCurveAddress && tokenTotalSupply && tokenTotalSupply !== '0') {
+                        // Check if holder already exists
+                        const existingHolder = await TokenHolder_1.default.findOne({
+                            tokenId: token._id,
+                            holderAddress: bondingCurveAddress,
+                            chainId: chainId
+                        });
+                        if (!existingHolder) {
+                            await TokenHolder_1.default.create({
+                                tokenId: token._id,
+                                tokenAddress: tokenAddress.toLowerCase(),
+                                holderAddress: bondingCurveAddress,
+                                balance: tokenTotalSupply,
+                                firstTransactionHash: '',
+                                lastTransactionHash: '',
+                                transactionCount: 0,
+                                chainId: chainId
+                            });
+                            console.log(`✅ Initial bonding curve holder created via API: ${bondingCurveAddress}`);
+                            // Recalculate percentages
+                            await (0, handler_1.recalculatePercentages)(tokenAddress.toLowerCase(), tokenTotalSupply, chainId);
+                        }
+                    }
+                }
+                catch (holderError) {
+                    // Log but don't fail - WebSocket event handler will create it as fallback
+                    console.warn('⚠️ Could not create holder synchronously (will be created by event handler):', holderError.message);
+                }
+            }
+            // NOW send response - all database updates are complete
             res.json({
                 success: true,
                 tokenAddress,

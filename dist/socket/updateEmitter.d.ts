@@ -26,6 +26,7 @@ export declare function emitTokenBought(data: {
     chainId: number;
     tokenPrice: string;
     marketCap?: string;
+    graduationProgress?: string;
     holders?: Array<{
         owner_address: string;
         balance: string;
@@ -47,6 +48,7 @@ export declare function emitTokenSold(data: {
     chainId: number;
     tokenPrice: string;
     marketCap?: string;
+    graduationProgress?: string;
     holders?: Array<{
         owner_address: string;
         balance: string;

@@ -25,8 +25,13 @@ const auth_1 = __importDefault(require("./routes/auth"));
 const upload_1 = __importDefault(require("./routes/upload"));
 const analytics_1 = __importDefault(require("./routes/analytics"));
 const chat_1 = __importDefault(require("./routes/chat"));
-const test_sendgrid_1 = __importDefault(require("./routes/test-sendgrid"));
-const debug_auth_1 = __importDefault(require("./routes/debug-auth"));
+// Debug/test routes - only in development
+let testSendGridRoutes = null;
+let debugAuthRoutes = null;
+if (process.env.NODE_ENV !== 'production') {
+    testSendGridRoutes = require('./routes/test-sendgrid').default;
+    debugAuthRoutes = require('./routes/debug-auth').default;
+}
 const tokenCreation_1 = __importDefault(require("./routes/tokenCreation"));
 const liquidityEvents_1 = __importDefault(require("./routes/liquidityEvents"));
 const wallet_1 = __importDefault(require("./routes/wallet"));
@@ -154,10 +159,15 @@ app.use('/api/auth', auth_1.default);
 app.use('/api/upload', upload_1.default);
 app.use('/api/analytics', analytics_1.default);
 app.use('/api/chat', chat_1.default);
-app.use('/api/test', test_sendgrid_1.default);
 app.use('/api/wallet', wallet_1.default);
+// Debug/test routes - only in development
 if (process.env.NODE_ENV !== 'production') {
-    app.use('/api/debug', debug_auth_1.default);
+    if (testSendGridRoutes) {
+        app.use('/api/test', testSendGridRoutes);
+    }
+    if (debugAuthRoutes) {
+        app.use('/api/debug', debugAuthRoutes);
+    }
 }
 // Serve frontend for all non-API routes (SPA routing)
 app.get('*', (req, res) => {

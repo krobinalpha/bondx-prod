@@ -2,7 +2,10 @@ import express, { Response } from 'express';
 import { authenticateToken } from '../middleware/auth';
 import { AuthRequest } from '../types';
 import Token from '../models/Token';
+import TokenHolder from '../models/TokenHolder';
 import { ethers } from 'ethers';
+import { getFactoryAddressForChain } from '../config/blockchain';
+import { recalculatePercentages } from '../sync/handler';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -330,8 +333,9 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
       }
 
       // Update token in database with price and market cap immediately
+      let token;
       try {
-        const token = await Token.findOne({
+        token = await Token.findOne({
           address: tokenAddress.toLowerCase(),
           chainId: chainId
         });
@@ -350,7 +354,7 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
           console.log(`✅ Token price and market cap set immediately: ${tokenAddress}`);
         } else {
           // Token doesn't exist yet - create it with price/market cap
-          await Token.create({
+          token = await Token.create({
             address: tokenAddress.toLowerCase(),
             name: name,
             symbol: symbol,
@@ -372,6 +376,45 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
         console.warn('⚠️ Could not update token in database immediately:', dbError.message);
       }
 
+      // ✅ CREATE HOLDER SYNCHRONOUSLY BEFORE SENDING RESPONSE
+      // This ensures holder exists when frontend redirects
+      if (token) {
+        try {
+          const bondingCurveAddress = getFactoryAddressForChain(chainId)?.toLowerCase();
+          const tokenTotalSupply = token.totalSupply || '0';
+          
+          if (bondingCurveAddress && tokenTotalSupply && tokenTotalSupply !== '0') {
+            // Check if holder already exists
+            const existingHolder = await TokenHolder.findOne({
+              tokenId: token._id,
+              holderAddress: bondingCurveAddress,
+              chainId: chainId
+            });
+            
+            if (!existingHolder) {
+              await TokenHolder.create({
+                tokenId: token._id,
+                tokenAddress: tokenAddress.toLowerCase(),
+                holderAddress: bondingCurveAddress,
+                balance: tokenTotalSupply,
+                firstTransactionHash: '',
+                lastTransactionHash: '',
+                transactionCount: 0,
+                chainId: chainId
+              });
+              console.log(`✅ Initial bonding curve holder created via API: ${bondingCurveAddress}`);
+              
+              // Recalculate percentages
+              await recalculatePercentages(tokenAddress.toLowerCase(), tokenTotalSupply, chainId);
+            }
+          }
+        } catch (holderError: any) {
+          // Log but don't fail - WebSocket event handler will create it as fallback
+          console.warn('⚠️ Could not create holder synchronously (will be created by event handler):', holderError.message);
+        }
+      }
+
+      // NOW send response - all database updates are complete
       res.json({
         success: true,
         tokenAddress,

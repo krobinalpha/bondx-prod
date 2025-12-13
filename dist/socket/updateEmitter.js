@@ -45,7 +45,7 @@ function emitTokenBought(data) {
         return;
     }
     try {
-        ioInstance.emit('tokenBought', {
+        const eventPayload = {
             tokenAddress: data.tokenAddress.toLowerCase(),
             buyer: data.buyer.toLowerCase(),
             ethAmount: data.ethAmount,
@@ -58,7 +58,19 @@ function emitTokenBought(data) {
             chainId: data.chainId,
             tokenPrice: data.tokenPrice,
             marketCap: data.marketCap || '0',
+            graduationProgress: data.graduationProgress,
             holders: data.holders || [],
+        };
+        ioInstance.emit('tokenBought', eventPayload);
+        // Debug logging
+        const connectedClients = ioInstance?.sockets?.sockets?.size || 0;
+        console.log(`🔍 DEBUG emitTokenBought:`, {
+            tokenAddress: data.tokenAddress,
+            txHash: data.txHash,
+            chainId: data.chainId,
+            connectedClients,
+            hasHolders: (data.holders || []).length > 0,
+            holdersCount: (data.holders || []).length,
         });
         console.log(`✅ tokenBought event emitted for ${data.tokenAddress}`);
     }
@@ -75,7 +87,7 @@ function emitTokenSold(data) {
         return;
     }
     try {
-        ioInstance.emit('tokenSold', {
+        const eventPayload = {
             tokenAddress: data.tokenAddress.toLowerCase(),
             seller: data.seller.toLowerCase(),
             ethAmount: data.ethAmount,
@@ -88,7 +100,19 @@ function emitTokenSold(data) {
             chainId: data.chainId,
             tokenPrice: data.tokenPrice,
             marketCap: data.marketCap || '0',
+            graduationProgress: data.graduationProgress,
             holders: data.holders || [],
+        };
+        ioInstance.emit('tokenSold', eventPayload);
+        // Debug logging
+        const connectedClients = ioInstance?.sockets?.sockets?.size || 0;
+        console.log(`🔍 DEBUG emitTokenSold:`, {
+            tokenAddress: data.tokenAddress,
+            txHash: data.txHash,
+            chainId: data.chainId,
+            connectedClients,
+            hasHolders: (data.holders || []).length > 0,
+            holdersCount: (data.holders || []).length,
         });
         console.log(`✅ tokenSold event emitted for ${data.tokenAddress}`);
     }

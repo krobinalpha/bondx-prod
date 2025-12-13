@@ -1,1 +1,1 @@
-{"version":3,"file":"tokenCreation.d.ts","sourceRoot":"","sources":["../../src/routes/tokenCreation.ts"],"names":[],"mappings":"AASA,QAAA,MAAM,MAAM,4CAAmB,CAAC;AAksBhC,eAAe,MAAM,CAAC"}
+{"version":3,"file":"tokenCreation.d.ts","sourceRoot":"","sources":["../../src/routes/tokenCreation.ts"],"names":[],"mappings":"AAYA,QAAA,MAAM,MAAM,4CAAmB,CAAC;AA0uBhC,eAAe,MAAM,CAAC"}
