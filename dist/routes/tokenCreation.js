@@ -207,8 +207,7 @@ router.post('/create-with-embedded-wallet', auth_1.authenticateToken, async (req
                     nonce: nonce,
                 });
                 // Create token with ETH
-                const tx = await factory.createToken(name, symbol, description, uri, 0n, // graduationEth = 0 uses default
-                {
+                const tx = await factory.createToken(name, symbol, description, uri, {
                     value: purchaseAmount,
                     gasLimit: 2000000n, // Set explicit gas limit
                 });

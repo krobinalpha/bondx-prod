@@ -150,7 +150,8 @@ router.get('/', [
         .limit(limit)
         .populate('liquidityEventsCount')
         .populate('transactionsCount')
-        .populate('holdersCount'),
+        .populate('holdersCount')
+        .lean(), // Use lean() for better performance (returns plain JS objects)
       Token.countDocuments(filter)
     ]);
 
@@ -220,7 +221,8 @@ router.get('/by-creator/:address', [
         .limit(limit)
         .populate('liquidityEventsCount')
         .populate('transactionsCount')
-        .populate('holdersCount'),
+        .populate('holdersCount')
+        .lean(), // Use lean() for better performance (returns plain JS objects)
       Token.countDocuments(filter)
     ]);
 
@@ -324,7 +326,8 @@ router.get('/trending', [
       .sort({ volume24hUSD: -1, priceChange24hPercent: -1 })
       .limit(parseInt(limit as string))
       .populate('liquidityEventsCount')
-      .populate('transactionsCount');
+      .populate('transactionsCount')
+      .lean(); // Use lean() for better performance (returns plain JS objects)
 
     res.json({ data: tokens });
   } catch (error) {
@@ -384,7 +387,8 @@ router.get('/address/:address/info-and-transactions', [
     const transactions = await Transaction.find(transactionQuery)
       .sort({ blockTimestamp: -1 })
       .skip(skip)
-      .limit(limit);
+      .limit(limit)
+      .lean(); // Use lean() for better performance (returns plain JS objects)
 
     const totalTransactions = await Transaction.countDocuments(transactionQuery);
 
@@ -792,46 +796,6 @@ router.get('/address/:address/user-balance', [
   } catch (error: any) {
     console.error('Error fetching user balance:', error);
     res.status(500).json({ error: 'Failed to fetch user balance' });
-  }
-});
-
-// GET /api/tokens/:address/token-allowance - Get token allowance
-router.get('/address/:address/token-allowance', [
-  param('address').custom(validateAddress).withMessage('Invalid token address'),
-  query('owner').custom(validateAddress).withMessage('Invalid owner address'),
-  query('spender').custom(validateAddress).withMessage('Invalid spender address'),
-  query('chainId').optional().isInt({ min: 1 }).withMessage('Invalid chain ID')
-], async (req: Request, res: Response): Promise<Response | void> => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    const { address: tokenAddress } = req.params;
-    const { owner, spender, chainId } = req.query;
-    const targetChainId = chainId ? parseInt(chainId as string) : parseInt(process.env.CHAIN_ID || '84532');
-
-    try {
-      // Get provider for this chain
-      const chainProvider = getProvider(targetChainId);
-      const tokenContract = new ethers.Contract(tokenAddress, TokenABI, chainProvider);
-      const allowance = await tokenContract.allowance(owner as string, spender as string);
-
-      res.json({
-        allowance: allowance.toString(),
-        allowanceFormatted: ethers.formatUnits(allowance, 18)
-      });
-    } catch (contractError: any) {
-      console.error('Error reading allowance from contract:', contractError);
-      res.status(500).json({ 
-        error: 'Failed to read allowance from contract',
-        details: contractError.message 
-      });
-    }
-  } catch (error: any) {
-    console.error('Error fetching token allowance:', error);
-    res.status(500).json({ error: 'Failed to fetch token allowance' });
   }
 });
 

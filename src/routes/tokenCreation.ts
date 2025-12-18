@@ -250,7 +250,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
           symbol,
           description,
           uri,
-          0n, // graduationEth = 0 uses default
           { 
             value: purchaseAmount,
             gasLimit: 2000000n, // Set explicit gas limit

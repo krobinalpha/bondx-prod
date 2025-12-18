@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.cleanupAuthStores = void 0;
 const express_1 = __importDefault(require("express"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const ethers_1 = require("ethers");
@@ -19,19 +20,34 @@ if (process.env.NODE_ENV !== 'production') {
     global.emailCodeStore = emailCodeStore;
 }
 // Clean up expired entries every 5 minutes
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of nonceStore.entries()) {
-        if (value.expiresAt < now) {
-            nonceStore.delete(key);
+// Store interval ID for cleanup on server shutdown
+let cleanupInterval = null;
+const startCleanupInterval = () => {
+    cleanupInterval = setInterval(() => {
+        const now = Date.now();
+        for (const [key, value] of nonceStore.entries()) {
+            if (value.expiresAt < now) {
+                nonceStore.delete(key);
+            }
         }
-    }
-    for (const [key, value] of emailCodeStore.entries()) {
-        if (value.expiresAt < now) {
-            emailCodeStore.delete(key);
+        for (const [key, value] of emailCodeStore.entries()) {
+            if (value.expiresAt < now) {
+                emailCodeStore.delete(key);
+            }
         }
+    }, 5 * 60 * 1000);
+};
+// Export cleanup function for server shutdown
+const cleanupAuthStores = () => {
+    if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+        cleanupInterval = null;
+        console.log('🧹 Auth store cleanup interval cleared');
     }
-}, 5 * 60 * 1000);
+};
+exports.cleanupAuthStores = cleanupAuthStores;
+// Start the cleanup interval
+startCleanupInterval();
 // Generate JWT token
 const generateToken = (userId, address, email) => {
     return jsonwebtoken_1.default.sign({ userId, address, email }, process.env.JWT_SECRET || 'your-secret-key-change-in-production', { expiresIn: '30d' });

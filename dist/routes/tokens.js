@@ -126,7 +126,8 @@ router.get('/', [
                 .limit(limit)
                 .populate('liquidityEventsCount')
                 .populate('transactionsCount')
-                .populate('holdersCount'),
+                .populate('holdersCount')
+                .lean(), // Use lean() for better performance (returns plain JS objects)
             Token_1.default.countDocuments(filter)
         ]);
         const totalPages = Math.ceil(totalCount / limit);
@@ -182,7 +183,8 @@ router.get('/by-creator/:address', [
                 .limit(limit)
                 .populate('liquidityEventsCount')
                 .populate('transactionsCount')
-                .populate('holdersCount'),
+                .populate('holdersCount')
+                .lean(), // Use lean() for better performance (returns plain JS objects)
             Token_1.default.countDocuments(filter)
         ]);
         const totalPages = Math.ceil(totalCount / limit);
@@ -268,7 +270,8 @@ router.get('/trending', [
             .sort({ volume24hUSD: -1, priceChange24hPercent: -1 })
             .limit(parseInt(limit))
             .populate('liquidityEventsCount')
-            .populate('transactionsCount');
+            .populate('transactionsCount')
+            .lean(); // Use lean() for better performance (returns plain JS objects)
         res.json({ data: tokens });
     }
     catch (error) {
@@ -318,7 +321,8 @@ router.get('/address/:address/info-and-transactions', [
         const transactions = await Transaction_1.default.find(transactionQuery)
             .sort({ blockTimestamp: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(limit)
+            .lean(); // Use lean() for better performance (returns plain JS objects)
         const totalTransactions = await Transaction_1.default.countDocuments(transactionQuery);
         res.json({
             data: {
@@ -700,44 +704,6 @@ router.get('/address/:address/user-balance', [
     catch (error) {
         console.error('Error fetching user balance:', error);
         res.status(500).json({ error: 'Failed to fetch user balance' });
-    }
-});
-// GET /api/tokens/:address/token-allowance - Get token allowance
-router.get('/address/:address/token-allowance', [
-    (0, express_validator_1.param)('address').custom(validation_1.validateAddress).withMessage('Invalid token address'),
-    (0, express_validator_1.query)('owner').custom(validation_1.validateAddress).withMessage('Invalid owner address'),
-    (0, express_validator_1.query)('spender').custom(validation_1.validateAddress).withMessage('Invalid spender address'),
-    (0, express_validator_1.query)('chainId').optional().isInt({ min: 1 }).withMessage('Invalid chain ID')
-], async (req, res) => {
-    try {
-        const errors = (0, express_validator_1.validationResult)(req);
-        if (!errors.isEmpty()) {
-            return res.status(400).json({ errors: errors.array() });
-        }
-        const { address: tokenAddress } = req.params;
-        const { owner, spender, chainId } = req.query;
-        const targetChainId = chainId ? parseInt(chainId) : parseInt(process.env.CHAIN_ID || '84532');
-        try {
-            // Get provider for this chain
-            const chainProvider = (0, blockchain_1.getProvider)(targetChainId);
-            const tokenContract = new ethers_1.ethers.Contract(tokenAddress, Token_json_1.default, chainProvider);
-            const allowance = await tokenContract.allowance(owner, spender);
-            res.json({
-                allowance: allowance.toString(),
-                allowanceFormatted: ethers_1.ethers.formatUnits(allowance, 18)
-            });
-        }
-        catch (contractError) {
-            console.error('Error reading allowance from contract:', contractError);
-            res.status(500).json({
-                error: 'Failed to read allowance from contract',
-                details: contractError.message
-            });
-        }
-    }
-    catch (error) {
-        console.error('Error fetching token allowance:', error);
-        res.status(500).json({ error: 'Failed to fetch token allowance' });
     }
 });
 exports.default = router;

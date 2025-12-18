@@ -1425,4 +1425,3 @@ var e=`{
   }
 }
 `;export{e as default};
-//# sourceMappingURL=fr_FR-CM2EDAQC-DvlCXiU9.js.map

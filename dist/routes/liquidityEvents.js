@@ -30,8 +30,10 @@ router.get('/', [
             query.chainId = parseInt(chainId);
         }
         else {
-            // If no chainId provided, try to get it from token
-            const token = await Token_1.default.findOne({ address: tokenAddress.toLowerCase() });
+            // If no chainId provided, try to get it from token (optimize with lean and select only chainId)
+            const token = await Token_1.default.findOne({ address: tokenAddress.toLowerCase() })
+                .select('chainId')
+                .lean();
             if (token) {
                 query.chainId = token.chainId;
             }

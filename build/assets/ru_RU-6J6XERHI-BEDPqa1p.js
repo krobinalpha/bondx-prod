@@ -1425,4 +1425,3 @@ var u=`{
   }
 }
 `;export{u as default};
-//# sourceMappingURL=ru_RU-6J6XERHI-BEDPqa1p.js.map

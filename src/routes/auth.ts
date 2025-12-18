@@ -19,19 +19,36 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Clean up expired entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, value] of nonceStore.entries()) {
-    if (value.expiresAt < now) {
-      nonceStore.delete(key);
+// Store interval ID for cleanup on server shutdown
+let cleanupInterval: NodeJS.Timeout | null = null;
+
+const startCleanupInterval = (): void => {
+  cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [key, value] of nonceStore.entries()) {
+      if (value.expiresAt < now) {
+        nonceStore.delete(key);
+      }
     }
-  }
-  for (const [key, value] of emailCodeStore.entries()) {
-    if (value.expiresAt < now) {
-      emailCodeStore.delete(key);
+    for (const [key, value] of emailCodeStore.entries()) {
+      if (value.expiresAt < now) {
+        emailCodeStore.delete(key);
+      }
     }
+  }, 5 * 60 * 1000);
+};
+
+// Export cleanup function for server shutdown
+export const cleanupAuthStores = (): void => {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+    console.log('🧹 Auth store cleanup interval cleared');
   }
-}, 5 * 60 * 1000);
+};
+
+// Start the cleanup interval
+startCleanupInterval();
 
 // Generate JWT token
 const generateToken = (userId: string, address?: string, email?: string): string => {

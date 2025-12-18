@@ -1425,4 +1425,3 @@ var u=`{
   }
 }
 `;export{u as default};
-//# sourceMappingURL=ja_JP-CGMP6VLZ-BBxPp4Hq.js.map

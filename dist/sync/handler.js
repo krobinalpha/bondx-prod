@@ -3,12 +3,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.syncBlockRange = exports.saveCreatedEvent = exports.saveTradeEvent = exports.recalculatePercentages = void 0;
+exports.saveGraduationEvent = exports.syncBlockRange = exports.saveCreatedEvent = exports.saveTradeEvent = exports.recalculatePercentages = void 0;
 const ethers_1 = require("ethers");
 const Transaction_1 = __importDefault(require("../models/Transaction"));
 const TokenHistory_1 = __importDefault(require("../models/TokenHistory"));
 const Token_1 = __importDefault(require("../models/Token"));
 const TokenHolder_1 = __importDefault(require("../models/TokenHolder"));
+const LiquidityEvent_1 = __importDefault(require("../models/LiquidityEvent"));
 const blockchain_1 = require("../config/blockchain");
 const updateEmitter_1 = require("../socket/updateEmitter");
 // Helper function to validate and normalize price
@@ -134,6 +135,17 @@ const saveTradeEvent = async (eventData, priceData) => {
                 token.graduationProgress = graduationProgress.toString();
                 await token.save();
                 console.log(`✅ Graduation progress updated: ${token.graduationProgress} for token ${token.address}`);
+                // Check if token is ready to graduate and call graduateTokenManually
+                // Only check if token is still active (not already graduated)
+                if (newEthReserves >= graduationEth && token.isActive) {
+                    console.log(`🎓 Token ${token.address} reached graduation threshold on chain ${chainId}! Calling graduateTokenManually...`);
+                    console.log(`   realEthReserves: ${ethers_1.ethers.formatEther(newEthReserves)} ETH`);
+                    console.log(`   graduationEth: ${ethers_1.ethers.formatEther(graduationEth)} ETH`);
+                    // Call graduateTokenManually asynchronously (don't block the event processing)
+                    graduateTokenManually(token.address, chainId).catch((error) => {
+                        console.error(`❌ Error calling graduateTokenManually for ${token.address} on chain ${chainId}:`, error.message);
+                    });
+                }
             }
             catch (error) {
                 console.error(`❌ Error updating graduation progress:`, error.message);
@@ -745,4 +757,134 @@ exports.syncBlockRange = syncBlockRange;
 const handleNoEventsFound = (startBlock, endBlock) => {
     console.log(`No events found in blocks ${startBlock} to ${endBlock}`);
 };
+/**
+ * Call graduateTokenManually on the contract for a specific chain
+ * This is called automatically when a token reaches the graduation threshold
+ */
+async function graduateTokenManually(tokenAddress, chainId) {
+    try {
+        const contractWithSigner = (0, blockchain_1.getContractWithSigner)(chainId);
+        const provider = (0, blockchain_1.getProvider)(chainId);
+        // Estimate gas first
+        let gasEstimate;
+        try {
+            gasEstimate = await contractWithSigner.graduateTokenManually.estimateGas(tokenAddress);
+        }
+        catch (error) {
+            // If estimation fails, it might be because token is already graduated or not eligible
+            if (error.message?.includes('already liquidityAdded') ||
+                error.message?.includes('threshold not met') ||
+                error.message?.includes('not eligible')) {
+                console.log(`ℹ️ Token ${tokenAddress} on chain ${chainId} not eligible for graduation:`, error.message);
+                return;
+            }
+            throw error;
+        }
+        const feeData = await provider.getFeeData();
+        // Call graduateTokenManually with proper gas settings
+        const tx = await contractWithSigner.graduateTokenManually(tokenAddress, {
+            gasLimit: gasEstimate * 120n / 100n, // Add 20% buffer for safety
+            maxFeePerGas: feeData.maxFeePerGas || undefined,
+            maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
+        });
+        console.log(`✅ Graduation transaction sent for token ${tokenAddress} on chain ${chainId}`);
+        console.log(`   TX Hash: ${tx.hash}`);
+        // Wait for transaction receipt asynchronously (don't block)
+        tx.wait().then((receipt) => {
+            if (receipt) {
+                console.log(`✅ Token ${tokenAddress} on chain ${chainId} graduated successfully. TX: ${tx.hash}`);
+            }
+        }).catch((error) => {
+            console.error(`❌ Error waiting for graduation transaction ${tx.hash} on chain ${chainId}:`, error.message);
+        });
+    }
+    catch (error) {
+        // Check if it's already graduated or not eligible (these are expected cases)
+        if (error.message?.includes('already liquidityAdded') ||
+            error.message?.includes('threshold not met') ||
+            error.message?.includes('not eligible')) {
+            console.log(`ℹ️ Token ${tokenAddress} on chain ${chainId} not eligible for graduation:`, error.message);
+        }
+        else {
+            // Re-throw unexpected errors
+            throw error;
+        }
+    }
+}
+/**
+ * Save TokenGraduated event as a LiquidityEvent record
+ */
+const saveGraduationEvent = async (eventData) => {
+    try {
+        const chainId = eventData.chainId || parseInt(process.env.CHAIN_ID || '1');
+        // Validate required fields
+        if (!eventData.txHash) {
+            console.error('❌ saveGraduationEvent: txHash is missing in eventData:', eventData);
+            return;
+        }
+        if (!eventData.tokenAddress) {
+            console.error('❌ saveGraduationEvent: tokenAddress is missing in eventData:', eventData);
+            return;
+        }
+        // Check if the liquidity event already exists
+        const existingEvent = await LiquidityEvent_1.default.findOne({
+            txHash: eventData.txHash.toLowerCase(),
+            chainId: chainId
+        });
+        if (existingEvent) {
+            console.log(`⚠️ LiquidityEvent already exists for txHash: ${eventData.txHash}`);
+            return;
+        }
+        // Lookup token to get tokenId
+        const token = await Token_1.default.findOne({
+            address: eventData.tokenAddress?.toLowerCase(),
+            chainId: chainId
+        });
+        if (!token) {
+            console.warn(`⚠️ Token not found for graduation event: ${eventData.tokenAddress} on chain ${chainId}`);
+            return;
+        }
+        // Get Uniswap router address from environment or use factory address as fallback
+        const factoryAddress = (0, blockchain_1.getFactoryAddressForChain)(chainId);
+        const uniswapRouter = process.env.UNISWAP_ROUTER_ADDRESS || factoryAddress || '0x0000000000000000000000000000000000000000';
+        // Calculate graduation price from event data
+        let graduationPrice = '0';
+        if (eventData.graduationPrice) {
+            try {
+                graduationPrice = ethers_1.ethers.formatUnits(BigInt(eventData.graduationPrice.toString()), 18);
+            }
+            catch (err) {
+                console.warn('⚠️ Could not format graduation price:', err);
+            }
+        }
+        // Create LiquidityEvent record
+        await LiquidityEvent_1.default.create({
+            tokenId: token._id,
+            tokenAddress: eventData.tokenAddress.toLowerCase(),
+            type: 'add', // Graduation always adds liquidity
+            providerAddress: uniswapRouter.toLowerCase(),
+            ethAmount: eventData.ethAmount?.toString() || '0',
+            tokenAmount: eventData.tokenAmount?.toString() || '0',
+            tokenPrice: graduationPrice,
+            tokenPriceUSD: '0', // Can be calculated later if needed
+            liquidityPoolAddress: uniswapRouter.toLowerCase(),
+            txHash: eventData.txHash.toLowerCase(),
+            blockNumber: eventData.blockNumber || 0,
+            blockTimestamp: eventData.blockTimestamp || new Date(),
+            chainId: chainId,
+            status: 'confirmed',
+            methodName: 'TokenGraduated',
+        });
+        console.log(`✅ LiquidityEvent created for graduated token: ${eventData.tokenAddress}`);
+        // Update token's isActive status to false (token is no longer active on bonding curve)
+        token.isActive = false;
+        await token.save();
+        console.log(`✅ Token ${eventData.tokenAddress} marked as inactive (graduated)`);
+    }
+    catch (error) {
+        console.error('❌ Error saving graduation event:', error.message);
+        console.error('   Full error:', error);
+    }
+};
+exports.saveGraduationEvent = saveGraduationEvent;
 //# sourceMappingURL=handler.js.map

@@ -7,6 +7,7 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
 const morgan_1 = __importDefault(require("morgan"));
+const compression_1 = __importDefault(require("compression"));
 const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
@@ -95,6 +96,10 @@ app.use((0, helmet_1.default)({
         policy: "unsafe-none", // Required for Base Account SDK
     },
 }));
+// Compression middleware - compress all responses
+// Level 6 is a good balance between compression ratio and CPU usage
+// @ts-ignore - Type conflict between compression and express types
+app.use((0, compression_1.default)({ level: 6 }));
 app.use((0, morgan_1.default)('combined'));
 // Handle preflight OPTIONS requests FIRST - before CORS middleware
 app.options('*', (_req, res) => {
@@ -124,11 +129,13 @@ const corsOptions = {
     preflightContinue: false,
 };
 app.use((0, cors_1.default)(corsOptions));
-// Rate limiting
+// Rate limiting - reasonable defaults for production
 const limiter = (0, express_rate_limit_1.default)({
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '600000'),
-    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000000'),
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '600000'), // 10 minutes
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000000'), // 100 requests per 10 minutes (much more reasonable)
     message: { error: 'Too many requests, please try again later.' },
+    standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+    legacyHeaders: false, // Disable `X-RateLimit-*` headers
     // Disable trust proxy validation to avoid ERR_ERL_PERMISSIVE_TRUST_PROXY
     validate: {
         trustProxy: false,
@@ -146,7 +153,24 @@ const buildPath = path_1.default.join(projectRoot, 'backend', 'src', 'build');
 const actualBuildPath = fs_1.default.existsSync(buildPath)
     ? buildPath
     : path_1.default.join(__dirname, 'build');
-app.use(express_1.default.static(actualBuildPath));
+// Serve static files with caching headers
+app.use(express_1.default.static(actualBuildPath, {
+    maxAge: '1y', // Cache for 1 year
+    etag: true, // Enable ETag for cache validation
+    lastModified: true, // Enable Last-Modified header
+    immutable: true, // Mark as immutable (won't change)
+    setHeaders: (res, path) => {
+        // Add cache headers for different file types
+        if (path.endsWith('.html')) {
+            // HTML files should not be cached (for SPA routing)
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        }
+        else if (path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
+            // Static assets can be cached for 1 year
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+    },
+}));
 // Health check endpoint
 app.get('/health', (_req, res) => {
     res.status(200).json({
@@ -225,6 +249,21 @@ const io = new socket_io_1.Server(server, {
 // Initialize Socket logic
 const socket_1 = __importDefault(require("./socket"));
 (0, socket_1.default)(io);
+// Global error handlers
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise);
+    console.error('   Reason:', reason);
+    // Don't exit in production - just log (could send to error tracking service)
+    if (process.env.NODE_ENV === 'development') {
+        console.error('   Stack:', reason?.stack);
+    }
+});
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    console.error('   Stack:', error.stack);
+    // Exit in production for safety (prevent undefined behavior)
+    process.exit(1);
+});
 // Connect to MongoDB and start server
 const startServer = async () => {
     try {
@@ -248,6 +287,14 @@ startServer();
 // Graceful shutdown
 const shutdown = () => {
     console.log('Shutting down gracefully...');
+    // Clean up auth store intervals
+    try {
+        const { cleanupAuthStores } = require('./routes/auth');
+        cleanupAuthStores();
+    }
+    catch (err) {
+        // Ignore if module not loaded
+    }
     if (mongoose_1.default.connection.readyState === 1) {
         mongoose_1.default.connection.close(false).then(() => {
             console.log('MongoDB connection closed');

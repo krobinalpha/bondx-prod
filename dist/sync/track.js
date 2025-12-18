@@ -4,17 +4,78 @@ exports.trackTrading = void 0;
 const ethers_1 = require("ethers");
 const blockchain_1 = require("../config/blockchain");
 const handler_1 = require("./handler");
+// Store active tracking connections to prevent duplicates and enable cleanup
+const activeTracking = new Map();
+// Helper to remove all event listeners from a contract
+const removeAllEventListeners = (contract) => {
+    try {
+        contract.removeAllListeners('TokenBought');
+        contract.removeAllListeners('TokenSold');
+        contract.removeAllListeners('TokenCreated');
+        contract.removeAllListeners('TokenGraduated');
+    }
+    catch (err) {
+        // Ignore errors if listeners don't exist
+    }
+};
+// Reconnection function with exponential backoff
+const reconnectWebSocket = (chainId, retryCount = 0) => {
+    const maxRetries = 10;
+    const baseDelay = 2000; // Start with 2 seconds
+    const maxDelay = 60000; // Max 60 seconds
+    if (retryCount >= maxRetries) {
+        console.error(`❌ Max reconnection attempts (${maxRetries}) reached for chain ${chainId}. Stopping reconnection.`);
+        activeTracking.delete(chainId);
+        return;
+    }
+    // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s, 60s...
+    const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
+    console.log(`🔄 Reconnecting WebSocket for chain ${chainId} in ${delay}ms (attempt ${retryCount + 1}/${maxRetries})...`);
+    setTimeout(() => {
+        try {
+            trackChain(chainId);
+            console.log(`✅ Reconnection successful for chain ${chainId}`);
+        }
+        catch (error) {
+            console.error(`❌ Reconnection attempt ${retryCount + 1} failed for chain ${chainId}:`, error.message);
+            // Retry with incremented count
+            reconnectWebSocket(chainId, retryCount + 1);
+        }
+    }, delay);
+};
 /**
  * Track events for a specific chain
+ * This function is idempotent - can be called multiple times safely
  */
 const trackChain = (chainId) => {
+    // Clean up existing connection if it exists (for reconnection)
+    const existing = activeTracking.get(chainId);
+    if (existing) {
+        console.log(`🧹 Cleaning up existing connection for chain ${chainId} before reconnecting...`);
+        try {
+            removeAllEventListeners(existing.contract);
+            // Don't destroy provider here - let it be garbage collected naturally
+            // Destroying might cause issues if it's still in use
+        }
+        catch (err) {
+            console.warn(`⚠️ Error cleaning up existing connection for chain ${chainId}:`, err);
+        }
+        activeTracking.delete(chainId);
+    }
     const ws_contract = (0, blockchain_1.getWsContract)(chainId);
     if (!ws_contract) {
         console.warn(`⚠️ WebSocket contract not available for chain ${chainId}. Tracking disabled for this chain.`);
+        activeTracking.delete(chainId);
         return;
     }
+    const wsProvider = ws_contract.provider;
     const chainProvider = (0, blockchain_1.getProvider)(chainId);
     const factoryAddress = (0, blockchain_1.getFactoryAddressForChain)(chainId);
+    // Store connection info for cleanup and reconnection
+    activeTracking.set(chainId, {
+        contract: ws_contract,
+        provider: wsProvider
+    });
     console.log(`🔍 Starting token trading tracking for chain ${chainId}...`);
     console.log(`📡 WebSocket contract address: ${factoryAddress}`);
     // Removed getNetwork() call - it causes timeouts and we already know the chainId
@@ -433,8 +494,115 @@ const trackChain = (chainId) => {
             console.error('❌ Error handling TokenCreated event:', err);
         }
     });
+    // TokenGraduated event - ethers.js v6 format
+    ws_contract.on('TokenGraduated', async (...args) => {
+        try {
+            // TokenGraduated event: event TokenGraduated(address indexed tokenAddress, uint256 graduationPrice)
+            const tokenAddress = args[0];
+            const graduationPrice = args[1];
+            const eventLog = args[args.length - 1];
+            console.log(`✅ TokenGraduated Event Detected on chain ${chainId}`);
+            console.log(`   Token: ${tokenAddress}`);
+            console.log(`   Graduation Price: ${ethers_1.ethers.formatUnits(graduationPrice, 18)} ETH`);
+            // Extract txHash and blockNumber from event log
+            let txHash = undefined;
+            let blockNumber = undefined;
+            if (eventLog && typeof eventLog === 'object') {
+                if (eventLog.log && eventLog.log.transactionHash) {
+                    txHash = eventLog.log.transactionHash;
+                    blockNumber = eventLog.log.blockNumber;
+                }
+                else if (eventLog.transactionHash) {
+                    txHash = eventLog.transactionHash;
+                    blockNumber = eventLog.blockNumber;
+                }
+                else if (eventLog.hash) {
+                    txHash = eventLog.hash;
+                }
+            }
+            // Fallback: Use queryFilter to get the event
+            if (!txHash) {
+                try {
+                    const filter = ws_contract.filters.TokenGraduated(tokenAddress);
+                    const events = await ws_contract.queryFilter(filter, 'latest', 'latest');
+                    if (events && events.length > 0) {
+                        const latestEvent = events[events.length - 1];
+                        if (latestEvent && 'log' in latestEvent) {
+                            const eventLog = latestEvent.log;
+                            if (eventLog && eventLog.transactionHash) {
+                                txHash = eventLog.transactionHash;
+                                blockNumber = eventLog.blockNumber;
+                            }
+                        }
+                        else if (latestEvent && 'transactionHash' in latestEvent) {
+                            // Fallback: event might have transactionHash directly
+                            txHash = latestEvent.transactionHash;
+                            blockNumber = latestEvent.blockNumber;
+                        }
+                    }
+                }
+                catch (err) {
+                    console.warn('⚠️ Could not get from queryFilter:', err);
+                }
+            }
+            // Final fallback: Get from transaction receipt if we have txHash
+            if (txHash && !blockNumber) {
+                try {
+                    const receipt = await chainProvider.getTransactionReceipt(txHash);
+                    if (receipt) {
+                        blockNumber = receipt.blockNumber;
+                    }
+                }
+                catch (err) {
+                    console.warn('⚠️ Could not get block from receipt:', err);
+                }
+            }
+            if (!txHash) {
+                console.error('❌ TokenGraduated event missing txHash after all extraction attempts');
+                return;
+            }
+            // Get block timestamp
+            let blockTimestamp = new Date();
+            if (blockNumber) {
+                try {
+                    const block = await chainProvider.getBlock(blockNumber);
+                    blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
+                }
+                catch (err) {
+                    console.warn('⚠️ Could not get block timestamp:', err);
+                }
+            }
+            else if (txHash) {
+                try {
+                    const receipt = await chainProvider.getTransactionReceipt(txHash);
+                    if (receipt) {
+                        blockNumber = receipt.blockNumber;
+                        const block = await chainProvider.getBlock(blockNumber);
+                        blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
+                    }
+                }
+                catch (err) {
+                    console.warn('⚠️ Could not get block from receipt:', err);
+                }
+            }
+            const eventData = {
+                txHash: txHash,
+                tokenAddress: tokenAddress,
+                graduationPrice: graduationPrice.toString(),
+                ethAmount: '0', // Will be updated if we track LiquidityAdded event
+                tokenAmount: '0', // Will be updated if we track LiquidityAdded event
+                blockNumber: blockNumber || 0,
+                blockTimestamp: blockTimestamp,
+                chainId: chainId,
+            };
+            await (0, handler_1.saveGraduationEvent)(eventData);
+            console.log(`✅ TokenGraduated event processed successfully`);
+        }
+        catch (err) {
+            console.error('❌ Error handling TokenGraduated event:', err);
+        }
+    });
     // Add error handlers for WebSocket connection
-    const wsProvider = ws_contract.provider;
     if (wsProvider && 'on' in wsProvider) {
         // Handle WebSocket provider errors (supported event)
         try {
@@ -448,21 +616,32 @@ const trackChain = (chainId) => {
             console.warn(`⚠️ Could not attach error handler to WebSocket provider for chain ${chainId}`);
         }
         // Monitor connection health by checking the underlying WebSocket
-        if (wsProvider._websocket) {
-            const underlyingWs = wsProvider._websocket;
-            underlyingWs.on('error', (error) => {
-                console.error(`❌ Underlying WebSocket error for chain ${chainId}:`, error);
-            });
-            underlyingWs.on('close', (code, reason) => {
-                console.warn(`⚠️ WebSocket connection closed for chain ${chainId}. Code: ${code}`);
-                if (reason) {
-                    console.warn(`   Reason: ${reason.toString()}`);
-                }
-                console.warn(`⚠️ Event tracking is now disabled for chain ${chainId}. Please restart the server to re-enable.`);
-            });
-            underlyingWs.on('open', () => {
-                console.log(`✅ WebSocket connection established for chain ${chainId}`);
-            });
+        if (wsProvider.websocket) {
+            const underlyingWs = wsProvider.websocket; // WebSocketLike might not have all EventEmitter methods
+            if (underlyingWs && typeof underlyingWs.on === 'function') {
+                underlyingWs.on('error', (error) => {
+                    console.error(`❌ Underlying WebSocket error for chain ${chainId}:`, error);
+                });
+                underlyingWs.on('close', (code, reason) => {
+                    console.warn(`⚠️ WebSocket connection closed for chain ${chainId}. Code: ${code}`);
+                    if (reason) {
+                        console.warn(`   Reason: ${reason.toString()}`);
+                    }
+                    // Remove from active tracking
+                    activeTracking.delete(chainId);
+                    // Attempt to reconnect (only if not a normal closure)
+                    if (code !== 1000) { // 1000 = normal closure (don't reconnect)
+                        console.log(`🔄 Attempting to reconnect WebSocket for chain ${chainId}...`);
+                        reconnectWebSocket(chainId, 0);
+                    }
+                    else {
+                        console.log(`ℹ️ WebSocket closed normally for chain ${chainId}. No reconnection needed.`);
+                    }
+                });
+                underlyingWs.on('open', () => {
+                    console.log(`✅ WebSocket connection established for chain ${chainId}`);
+                });
+            }
         }
     }
     console.log(`✅ Token trading tracking initialized for chain ${chainId}`);

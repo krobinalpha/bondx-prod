@@ -77,20 +77,85 @@ export function getContract(chainId: number): ethers.Contract {
   return new ethers.Contract(factoryAddress, FactoryABI, provider);
 }
 
+// Cache WebSocket providers to prevent multiple connections for the same chain
+const wsProviderCache = new Map<number, ethers.WebSocketProvider>();
+
 /**
  * Create WebSocket provider dynamically for a given chainId
+ * Caches providers to prevent multiple connections
  */
 export function getWsProvider(chainId: number): ethers.WebSocketProvider | null {
+  // Return cached provider if exists and still connected
+  const cached = wsProviderCache.get(chainId);
+  if (cached) {
+    try {
+      // Check if the underlying WebSocket is still open
+      const underlyingWs = (cached as any).websocket || (cached as any)._websocket;
+      if (underlyingWs) {
+        const readyState = underlyingWs.readyState;
+        // WebSocket readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
+        if (readyState === 1) { // OPEN - reuse it
+          return cached;
+        }
+        // If not open, remove from cache and create new one
+        console.log(`🔄 Cached WebSocket for chain ${chainId} is not open (state: ${readyState}). Creating new connection...`);
+        wsProviderCache.delete(chainId);
+        
+        // Only try to destroy if WebSocket is in OPEN or CLOSING state
+        // Don't destroy if CONNECTING (0) - it will throw "WebSocket was closed before the connection was established"
+        // Don't destroy if CLOSED (3) - it's already closed
+        if (readyState === 1 || readyState === 2) { // OPEN or CLOSING
+          try {
+            cached.destroy();
+          } catch (destroyErr: any) {
+            // Ignore destroy errors - WebSocket might already be closed or in an invalid state
+            console.log(`ℹ️ Could not destroy cached provider for chain ${chainId} (state: ${readyState}):`, destroyErr.message);
+          }
+        } else {
+          // For CONNECTING (0) or CLOSED (3), just remove from cache without destroying
+          console.log(`ℹ️ Skipping destroy for chain ${chainId} (WebSocket state: ${readyState} - CONNECTING or CLOSED)`);
+        }
+      } else {
+        // No underlying WebSocket found, just remove from cache
+        console.log(`🔄 Cached provider for chain ${chainId} has no underlying WebSocket. Creating new connection...`);
+        wsProviderCache.delete(chainId);
+      }
+    } catch (err) {
+      // If we can't check status, assume it's dead and create new one
+      console.warn(`⚠️ Error checking cached provider for chain ${chainId}:`, err);
+      wsProviderCache.delete(chainId);
+    }
+  }
+  
   const wsUrl = getWsUrl(chainId);
   if (!wsUrl) {
     return null;
   }
   
   try {
-    return new ethers.WebSocketProvider(
+    const provider = new ethers.WebSocketProvider(
       wsUrl,
       chainId // Pass chainId as number
     );
+    
+    // Cache the provider
+    wsProviderCache.set(chainId, provider);
+    
+    // Clean up cache entry if connection closes or errors
+    const underlyingWs = (provider as any).websocket || (provider as any)._websocket;
+    if (underlyingWs) {
+      underlyingWs.on('close', () => {
+        wsProviderCache.delete(chainId);
+      });
+      
+      // Also handle error events to clean up cache
+      underlyingWs.on('error', (error: any) => {
+        console.warn(`⚠️ WebSocket error for chain ${chainId}, removing from cache:`, error.message || error);
+        wsProviderCache.delete(chainId);
+      });
+    }
+    
+    return provider;
   } catch (error) {
     console.warn(`⚠️ WebSocket provider initialization failed for chain ${chainId}:`, error);
     return null;
@@ -131,6 +196,35 @@ export function getConfiguredChains(): number[] {
   }
   
   return configuredChains;
+}
+
+/**
+ * Get owner signer for a given chainId (for admin functions like graduateTokenManually)
+ * Uses chain-specific private key: OWNER_PRIVATE_KEY_{CHAIN_NAME} or fallback to OWNER_PRIVATE_KEY
+ */
+export function getOwnerSigner(chainId: number): ethers.Wallet {
+  const chainName = getChainName(chainId);
+  const privateKey = process.env[`OWNER_PRIVATE_KEY_${chainName}`] || process.env.OWNER_PRIVATE_KEY;
+  
+  if (!privateKey) {
+    throw new Error(
+      `Owner private key not configured for chain ${chainId} (${chainName}). ` +
+      `Set OWNER_PRIVATE_KEY_${chainName} or OWNER_PRIVATE_KEY in environment variables.`
+    );
+  }
+  
+  const provider = getProvider(chainId);
+  return new ethers.Wallet(privateKey, provider);
+}
+
+/**
+ * Get contract instance with owner signer for a given chainId
+ * Used for calling admin functions like graduateTokenManually
+ */
+export function getContractWithSigner(chainId: number): ethers.Contract {
+  const signer = getOwnerSigner(chainId);
+  const factoryAddress = getFactoryAddressForChain(chainId);
+  return new ethers.Contract(factoryAddress, FactoryABI, signer);
 }
 
 // Default chainId for backward compatibility (uses CHAIN_ID env var or Base Sepolia)

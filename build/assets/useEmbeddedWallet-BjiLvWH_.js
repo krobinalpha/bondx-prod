@@ -1,0 +1,1 @@
+import{u as s}from"./index-BL-XySwm.js";import{r as d}from"./react-vendor-BTPJ9MfQ.js";function l(){const{user:e}=s(),t=d.useMemo(()=>localStorage.getItem("embedded_wallet")==="true",[e]),r=d.useMemo(()=>{if(t&&(e!=null&&e.address))return e.address},[t,e==null?void 0:e.address]);return{isEmbeddedWallet:t,walletAddress:r,hasWallet:!!r}}export{l as u};
