@@ -121,6 +121,25 @@ export interface ITransaction extends Document {
     updatedAt: Date;
     calculateGasCostUSD(ethPriceUSD: string): Promise<ITransaction>;
 }
+export interface IActivity extends Document {
+    _id: Types.ObjectId;
+    type: 'deposit' | 'withdraw';
+    walletAddress: string;
+    fromAddress: string;
+    toAddress: string;
+    amount: string;
+    amountUSD: string;
+    txHash: string;
+    blockNumber: number;
+    blockTimestamp: Date;
+    chainId: number;
+    status: 'pending' | 'confirmed' | 'failed';
+    gasUsed: string;
+    gasCost: string;
+    userId: Types.ObjectId | null;
+    createdAt: Date;
+    updatedAt: Date;
+}
 export interface ILiquidityEvent extends Document {
     _id: Types.ObjectId;
     tokenId: string;
@@ -185,6 +204,9 @@ export interface IChatMessage extends Document {
     message: string;
     reply_to: number | null;
     timestamp: Date;
+    editedAt?: Date;
+    isDeleted?: boolean;
+    deletedAt?: Date;
 }
 export interface JWTPayload {
     userId: string;

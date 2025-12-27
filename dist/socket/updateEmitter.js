@@ -6,13 +6,15 @@ exports.emitTokenBought = emitTokenBought;
 exports.emitTokenSold = emitTokenSold;
 exports.emitTokenCreated = emitTokenCreated;
 exports.emitTokenTraded = emitTokenTraded;
+exports.emitDepositDetected = emitDepositDetected;
+exports.emitWithdrawDetected = emitWithdrawDetected;
+exports.emitBalanceUpdate = emitBalanceUpdate;
 let ioInstance = null;
 /**
  * Initialize the Socket.IO instance for all token event updates
  */
 function initUpdateEmitter(io) {
     ioInstance = io;
-    console.log('✅ Update emitter initialized (includes price updates and token events)');
 }
 /**
  * Emit a price update to all connected clients
@@ -20,7 +22,6 @@ function initUpdateEmitter(io) {
  */
 function emitTokenPriceUpdate(tokenAddress, data) {
     if (!ioInstance) {
-        console.warn('⚠️ Socket.IO instance not initialized. Price update not emitted.');
         return;
     }
     try {
@@ -28,6 +29,7 @@ function emitTokenPriceUpdate(tokenAddress, data) {
         ioInstance.emit('priceUpdate', {
             tokenAddress: normalizedAddress,
             price: data.price,
+            priceUSD: data.priceUSD || data.price, // Include priceUSD, fallback to price if not provided
             timestamp: typeof data.timestamp === 'string' ? data.timestamp : data.timestamp.toISOString(),
             chainId: data.chainId,
         });
@@ -41,7 +43,6 @@ function emitTokenPriceUpdate(tokenAddress, data) {
  */
 function emitTokenBought(data) {
     if (!ioInstance) {
-        console.warn('⚠️ Socket.IO instance not initialized. tokenBought event not emitted.');
         return;
     }
     try {
@@ -62,17 +63,6 @@ function emitTokenBought(data) {
             holders: data.holders || [],
         };
         ioInstance.emit('tokenBought', eventPayload);
-        // Debug logging
-        const connectedClients = ioInstance?.sockets?.sockets?.size || 0;
-        console.log(`🔍 DEBUG emitTokenBought:`, {
-            tokenAddress: data.tokenAddress,
-            txHash: data.txHash,
-            chainId: data.chainId,
-            connectedClients,
-            hasHolders: (data.holders || []).length > 0,
-            holdersCount: (data.holders || []).length,
-        });
-        console.log(`✅ tokenBought event emitted for ${data.tokenAddress}`);
     }
     catch (error) {
         console.error('❌ Error emitting tokenBought event:', error);
@@ -83,7 +73,6 @@ function emitTokenBought(data) {
  */
 function emitTokenSold(data) {
     if (!ioInstance) {
-        console.warn('⚠️ Socket.IO instance not initialized. tokenSold event not emitted.');
         return;
     }
     try {
@@ -104,17 +93,6 @@ function emitTokenSold(data) {
             holders: data.holders || [],
         };
         ioInstance.emit('tokenSold', eventPayload);
-        // Debug logging
-        const connectedClients = ioInstance?.sockets?.sockets?.size || 0;
-        console.log(`🔍 DEBUG emitTokenSold:`, {
-            tokenAddress: data.tokenAddress,
-            txHash: data.txHash,
-            chainId: data.chainId,
-            connectedClients,
-            hasHolders: (data.holders || []).length > 0,
-            holdersCount: (data.holders || []).length,
-        });
-        console.log(`✅ tokenSold event emitted for ${data.tokenAddress}`);
     }
     catch (error) {
         console.error('❌ Error emitting tokenSold event:', error);
@@ -125,7 +103,6 @@ function emitTokenSold(data) {
  */
 function emitTokenCreated(data) {
     if (!ioInstance) {
-        console.warn('⚠️ Socket.IO instance not initialized. tokenCreated event not emitted.');
         return;
     }
     try {
@@ -145,7 +122,6 @@ function emitTokenCreated(data) {
                 ? data.timestamp
                 : data.timestamp.toISOString(),
         });
-        console.log(`✅ tokenCreated event emitted for ${data.tokenAddress}`);
     }
     catch (error) {
         console.error('❌ Error emitting tokenCreated event:', error);
@@ -156,7 +132,6 @@ function emitTokenCreated(data) {
  */
 function emitTokenTraded(data) {
     if (!ioInstance) {
-        console.warn('⚠️ Socket.IO instance not initialized. tokenTraded event not emitted.');
         return;
     }
     try {
@@ -175,10 +150,119 @@ function emitTokenTraded(data) {
             marketCap: data.marketCap || '0',
             holders: data.holders || [],
         });
-        console.log(`✅ tokenTraded event emitted for ${data.tokenAddress}`);
     }
     catch (error) {
         console.error('❌ Error emitting tokenTraded event:', error);
+    }
+}
+/**
+ * Emit depositDetected event when a deposit is detected for an embedded wallet
+ * This enables real-time notifications and balance updates in the frontend
+ * Emits to user-specific room if userId is provided, otherwise broadcasts
+ */
+function emitDepositDetected(data) {
+    if (!ioInstance) {
+        return;
+    }
+    try {
+        const eventPayload = {
+            walletAddress: data.walletAddress.toLowerCase(),
+            fromAddress: data.fromAddress.toLowerCase(),
+            amount: data.amount,
+            amountFormatted: data.amountFormatted || data.amount,
+            txHash: data.txHash.toLowerCase(),
+            blockNumber: data.blockNumber,
+            blockTimestamp: typeof data.blockTimestamp === 'string'
+                ? data.blockTimestamp
+                : data.blockTimestamp.toISOString(),
+            chainId: data.chainId,
+            userId: data.userId || null,
+            type: 'deposit', // Add type for frontend to distinguish
+        };
+        // Emit to specific user room if userId is provided
+        if (data.userId) {
+            const userRoom = `user:${data.userId}`;
+            ioInstance.to(userRoom).emit('depositDetected', eventPayload);
+            console.log(`📨 Deposit notification sent to user ${data.userId} (room: ${userRoom})`);
+        }
+        else {
+            // Fallback: emit to all clients (for backward compatibility or unauthenticated cases)
+            ioInstance.emit('depositDetected', eventPayload);
+            console.log('📨 Deposit notification broadcasted to all clients (no userId)');
+        }
+    }
+    catch (error) {
+        console.error('❌ Error emitting depositDetected event:', error);
+    }
+}
+/**
+ * Emit withdrawDetected event when a withdrawal is detected for an embedded wallet
+ * This enables real-time notifications and balance updates in the frontend
+ * Emits to user-specific room if userId is provided, otherwise broadcasts
+ */
+function emitWithdrawDetected(data) {
+    if (!ioInstance) {
+        return;
+    }
+    try {
+        const eventPayload = {
+            walletAddress: data.walletAddress.toLowerCase(),
+            toAddress: data.toAddress.toLowerCase(),
+            amount: data.amount,
+            amountFormatted: data.amountFormatted || data.amount,
+            txHash: data.txHash.toLowerCase(),
+            blockNumber: data.blockNumber,
+            blockTimestamp: typeof data.blockTimestamp === 'string'
+                ? data.blockTimestamp
+                : data.blockTimestamp.toISOString(),
+            chainId: data.chainId,
+            userId: data.userId || null,
+            type: 'withdraw', // Add type for frontend to distinguish
+        };
+        // Emit to specific user room if userId is provided
+        if (data.userId) {
+            const userRoom = `user:${data.userId}`;
+            ioInstance.to(userRoom).emit('withdrawDetected', eventPayload);
+            console.log(`📨 Withdraw notification sent to user ${data.userId} (room: ${userRoom})`);
+        }
+        else {
+            // Fallback: emit to all clients (for backward compatibility or unauthenticated cases)
+            ioInstance.emit('withdrawDetected', eventPayload);
+            console.log('📨 Withdraw notification broadcasted to all clients (no userId)');
+        }
+    }
+    catch (error) {
+        console.error('❌ Error emitting withdrawDetected event:', error);
+    }
+}
+/**
+ * Emit balanceUpdate event when balance changes (after deposit/withdraw)
+ * This enables real-time balance updates in the frontend (Binance-like approach)
+ * Balance is fetched fresh from blockchain after database update
+ */
+function emitBalanceUpdate(data) {
+    if (!ioInstance) {
+        return;
+    }
+    try {
+        const eventPayload = {
+            walletAddress: data.walletAddress.toLowerCase(),
+            balance: data.balance,
+            balanceFormatted: data.balanceFormatted,
+            chainId: data.chainId,
+            timestamp: new Date().toISOString(),
+        };
+        // Emit to specific user room
+        const userRoom = `user:${data.userId}`;
+        ioInstance.to(userRoom).emit('balanceUpdate', eventPayload);
+        console.log(`💰 Balance update sent to user ${data.userId} (room: ${userRoom})`, {
+            walletAddress: data.walletAddress,
+            balance: data.balanceFormatted,
+            chainId: data.chainId
+        });
+    }
+    catch (error) {
+        console.error('❌ Error emitting balanceUpdate event:', error);
     }
 }
 //# sourceMappingURL=updateEmitter.js.map

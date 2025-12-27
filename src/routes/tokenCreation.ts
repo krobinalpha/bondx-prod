@@ -1,11 +1,13 @@
 import express, { Response } from 'express';
+import { body, validationResult } from 'express-validator';
 import { authenticateToken } from '../middleware/auth';
 import { AuthRequest } from '../types';
 import Token from '../models/Token';
 import TokenHolder from '../models/TokenHolder';
 import { ethers } from 'ethers';
-import { getFactoryAddressForChain } from '../config/blockchain';
+import { getFactoryAddressForChain, getProvider } from '../config/blockchain';
 import { recalculatePercentages } from '../sync/handler';
+import { getEthPriceUSD } from '../services/ethPriceService';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -17,8 +19,22 @@ const router = express.Router();
  * Create a token using the user's embedded wallet
  * This endpoint signs and sends the transaction on behalf of the user
  */
-router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthRequest, res: Response): Promise<Response | void> => {
+router.post('/create-with-embedded-wallet', 
+  authenticateToken,
+  [
+    body('name').trim().isLength({ min: 1, max: 10 }).withMessage('Token name must be between 1 and 10 characters'),
+    body('symbol').trim().isLength({ min: 1, max: 7 }).withMessage('Token symbol must be between 1 and 7 characters'),
+    body('description').optional().trim().isLength({ max: 200 }).withMessage('Description must not exceed 200 characters'),
+    body('uri').notEmpty().withMessage('Token image URI is required'),
+    body('chainId').isInt().withMessage('Chain ID must be a valid integer'),
+  ],
+  async (req: AuthRequest, res: Response): Promise<Response | void> => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     // req.user is the full User document from mongoose (set by authenticateToken middleware)
     const user = req.user;
     if (!user || !user._id) {
@@ -34,11 +50,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
       paymentToken,
       chainId 
     } = req.body;
-
-    // Validate required fields (initialPurchaseAmount is optional)
-    if (!name || !symbol || !description || !uri || !chainId) {
-      return res.status(400).json({ error: 'Missing required fields: name, symbol, description, uri, or chainId' });
-    }
 
     // Convert initialPurchaseAmount to BigInt (it comes as string from frontend, can be 0 or undefined)
     let purchaseAmount: bigint = 0n;
@@ -93,31 +104,10 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
 
     // Get factory address for chain
     const chainName = getChainName(chainId);
-    console.log("chaindName:", chainName);
     const factoryAddress = process.env[`FACTORY_ADDRESS_${chainName}`] || process.env.TOKEN_FACTORY_ADDRESS;
     if (!factoryAddress) {
       return res.status(400).json({ 
         error: `Factory address not configured for chain ${chainId}` 
-      });
-    }
-
-    // Get RPC URL for chain
-    const rpcUrl = getRpcUrl(chainId);
-    if (!rpcUrl) {
-      return res.status(400).json({ 
-        error: `RPC URL not configured for chain ${chainId}`,
-        chainId: chainId,
-        suggestion: `Please set ${getRpcUrlEnvKey(chainId)} in your backend .env file`
-      });
-    }
-    
-    // Validate RPC URL doesn't contain placeholders
-    if (rpcUrl.includes('YOUR_') || rpcUrl.includes('your_') || rpcUrl.includes('PLACEHOLDER') || rpcUrl.includes('example')) {
-      return res.status(400).json({ 
-        error: `Invalid RPC URL configuration for chain ${chainId}`,
-        chainId: chainId,
-        rpcUrl: rpcUrl.substring(0, 50) + '...',
-        suggestion: `Please set a valid ${getRpcUrlEnvKey(chainId)} in your backend .env file. The URL contains a placeholder value.`
       });
     }
 
@@ -139,12 +129,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
     if (generatedAddress !== storedAddress) {
       // If addresses don't match, it might be because the wallet was created with the old SHA256 method
       // Try to update the wallet address in the database to match the new keccak256 method
-      console.warn('Wallet address mismatch - attempting to update stored address:', {
-        generated: generatedAddress,
-        stored: storedAddress,
-        userId: userId,
-        email: userEmail,
-      });
       
       // Update the wallet address in the database to match the generated one
       const walletIndex = user.walletAddresses.findIndex(
@@ -154,7 +138,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
       if (walletIndex !== -1) {
         user.walletAddresses[walletIndex].address = generatedAddress;
         await user.save();
-        console.log('✅ Updated wallet address in database to match generated address');
       } else {
         console.error('Could not find wallet to update in user.walletAddresses');
         return res.status(500).json({ 
@@ -169,8 +152,8 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
       }
     }
 
-    // Connect to provider
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    // Connect to provider (using getProvider to ensure staticNetwork option is set)
+    const provider = getProvider(chainId);
     const signer = wallet.connect(provider);
 
     // Load factory ABI
@@ -182,14 +165,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
     // Check balance (skip getNetwork() to avoid timeouts - we already know chainId)
     const balance = await provider.getBalance(wallet.address);
     
-    console.log('Wallet info:', {
-      address: wallet.address,
-      balance: ethers.formatEther(balance),
-      purchaseAmount: ethers.formatEther(purchaseAmount),
-      chainId: chainId.toString(),
-      factoryAddress: factoryAddress,
-      rpcUrl: rpcUrl.substring(0, 30) + '...',
-    });
     
     // Chain ID verification removed - provider is already created with correct chainId
     // No need to verify via getNetwork() which causes timeouts
@@ -231,19 +206,8 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
     let txHash: string;
     let receipt: ethers.ContractTransactionReceipt;
 
-    console.log("Creating token with purchase amount:", purchaseAmount.toString(), "Factory:", factoryAddress)
     try {
       if (paymentToken === 'ETH' || !paymentToken) {
-        // Get current nonce
-        const nonce = await provider.getTransactionCount(wallet.address, 'pending');
-        console.log('Transaction details:', {
-          from: wallet.address,
-          to: factoryAddress,
-          value: ethers.formatEther(purchaseAmount),
-          purchaseAmount: purchaseAmount.toString(),
-          nonce: nonce,
-        });
-        
         // Create token with ETH
         const tx = await factory.createToken(
           name,
@@ -256,7 +220,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
           }
         );
         
-        console.log('Transaction sent:', tx.hash);
         txHash = tx.hash;
         
         // Wait for confirmation with timeout
@@ -312,6 +275,8 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
       // Calculate initial price and market cap immediately
       let initialPrice = '0';
       let marketCap = '0';
+      let currentPriceUSD = '0';
+      let marketCapUSD = '0';
 
       if (virtualEthReserves && virtualTokenReserves && virtualTokenReserves > 0n) {
         try {
@@ -327,8 +292,27 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
             marketCap = ((totalSupply * priceInWei) / (10n ** 18n)).toString();
           }
         } catch (err) {
-          console.warn('⚠️ Could not calculate initial price/market cap:', err);
         }
+      }
+
+      // Fetch ETH price and calculate USD values
+      try {
+        const ethPriceUSD = await getEthPriceUSD();
+        const ethPrice = parseFloat(ethPriceUSD);
+        
+        if (initialPrice !== '0' && ethPrice > 0) {
+          // currentPrice is in ETH (decimal string), convert to USD
+          currentPriceUSD = (parseFloat(initialPrice) * ethPrice).toString();
+        }
+        
+        if (marketCap !== '0' && ethPrice > 0) {
+          // marketCap is in wei, convert to ETH first, then to USD
+          const marketCapInEth = Number(marketCap) / 1e18;
+          marketCapUSD = (marketCapInEth * ethPrice).toString();
+        }
+      } catch (error: any) {
+        console.error('❌ Error calculating USD values for token creation:', error.message);
+        // Continue with ETH-only values if USD calculation fails
       }
 
       // Update token in database with price and market cap immediately
@@ -342,7 +326,9 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
         if (token) {
           // Token exists - update it with price and market cap
           token.currentPrice = initialPrice;
+          token.currentPriceUSD = currentPriceUSD;
           token.marketCap = marketCap;
+          token.marketCapUSD = marketCapUSD;
           if (totalSupply) {
             token.totalSupply = totalSupply.toString();
           }
@@ -350,7 +336,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
             token.graduationEth = graduationEth.toString();
           }
           await token.save();
-          console.log(`✅ Token price and market cap set immediately: ${tokenAddress}`);
         } else {
           // Token doesn't exist yet - create it with price/market cap
           token = await Token.create({
@@ -365,14 +350,14 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
             graduationEth: graduationEth?.toString() || '0',
             graduationProgress: '0',
             currentPrice: initialPrice,
+            currentPriceUSD: currentPriceUSD,
             marketCap: marketCap,
+            marketCapUSD: marketCapUSD,
             isActive: true,
           });
-          console.log(`✅ Token created with price and market cap: ${tokenAddress}`);
         }
       } catch (dbError: any) {
         // Don't fail the request if DB update fails - WebSocket event will handle it
-        console.warn('⚠️ Could not update token in database immediately:', dbError.message);
       }
 
       // ✅ CREATE HOLDER SYNCHRONOUSLY BEFORE SENDING RESPONSE
@@ -401,7 +386,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
                 transactionCount: 0,
                 chainId: chainId
               });
-              console.log(`✅ Initial bonding curve holder created via API: ${bondingCurveAddress}`);
               
               // Recalculate percentages
               await recalculatePercentages(tokenAddress.toLowerCase(), tokenTotalSupply, chainId);
@@ -409,7 +393,6 @@ router.post('/create-with-embedded-wallet', authenticateToken, async (req: AuthR
           }
         } catch (holderError: any) {
           // Log but don't fail - WebSocket event handler will create it as fallback
-          console.warn('⚠️ Could not create holder synchronously (will be created by event handler):', holderError.message);
         }
       }
 
@@ -481,8 +464,9 @@ function getChainName(chainId: number): string {
   return names[chainId] || '';
 }
 
-// Helper function to get RPC URL for chain
-function getRpcUrl(chainId: number): string | undefined {
+// Helper function to get RPC URL for chain (unused but kept for potential future use)
+// @ts-expect-error - Function is intentionally unused but kept for future use
+function _getRpcUrl(chainId: number): string | undefined {
   const urls: Record<number, string | undefined> = {
     1: process.env.ETHEREUM_RPC_URL,
     8453: process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC_URL,
@@ -494,8 +478,9 @@ function getRpcUrl(chainId: number): string | undefined {
   return url?.trim() || undefined;
 }
 
-// Helper function to get environment variable key for RPC URL
-function getRpcUrlEnvKey(chainId: number): string {
+// Helper function to get environment variable key for RPC URL (unused but kept for potential future use)
+// @ts-expect-error - Function is intentionally unused but kept for future use
+function _getRpcUrlEnvKey(chainId: number): string {
   const keys: Record<number, string> = {
     1: 'ETHEREUM_RPC_URL',
     8453: 'BASE_RPC_URL or BASE_SEPOLIA_RPC_URL',
@@ -551,16 +536,11 @@ router.post('/buy-with-embedded-wallet', authenticateToken, async (req: AuthRequ
       });
     }
 
-    // Get factory address and RPC URL
+    // Get factory address
     const chainName = getChainName(chainId);
     const factoryAddress = process.env[`FACTORY_ADDRESS_${chainName}`] || process.env.TOKEN_FACTORY_ADDRESS;
     if (!factoryAddress) {
       return res.status(400).json({ error: `Factory address not configured for chain ${chainId}` });
-    }
-
-    const rpcUrl = getRpcUrl(chainId);
-    if (!rpcUrl) {
-      return res.status(400).json({ error: `RPC URL not configured for chain ${chainId}` });
     }
 
     // Generate wallet from user credentials
@@ -577,8 +557,8 @@ router.post('/buy-with-embedded-wallet', authenticateToken, async (req: AuthRequ
       await user.save();
     }
 
-    // Connect to provider
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    // Connect to provider (using getProvider to ensure staticNetwork option is set)
+    const provider = getProvider(chainId);
     const signer = wallet.connect(provider);
 
     // Load factory ABI
@@ -675,16 +655,11 @@ router.post('/sell-with-embedded-wallet', authenticateToken, async (req: AuthReq
       });
     }
 
-    // Get factory address and RPC URL
+    // Get factory address
     const chainName = getChainName(chainId);
     const factoryAddress = process.env[`FACTORY_ADDRESS_${chainName}`] || process.env.TOKEN_FACTORY_ADDRESS;
     if (!factoryAddress) {
       return res.status(400).json({ error: `Factory address not configured for chain ${chainId}` });
-    }
-
-    const rpcUrl = getRpcUrl(chainId);
-    if (!rpcUrl) {
-      return res.status(400).json({ error: `RPC URL not configured for chain ${chainId}` });
     }
 
     // Generate wallet from user credentials
@@ -701,8 +676,8 @@ router.post('/sell-with-embedded-wallet', authenticateToken, async (req: AuthReq
       await user.save();
     }
 
-    // Connect to provider
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    // Connect to provider (using getProvider to ensure staticNetwork option is set)
+    const provider = getProvider(chainId);
     const signer = wallet.connect(provider);
 
     // Load factory and token ABIs

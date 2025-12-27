@@ -30,11 +30,9 @@ const reconnectWebSocket = (chainId, retryCount = 0) => {
     }
     // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s, 60s...
     const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
-    console.log(`🔄 Reconnecting WebSocket for chain ${chainId} in ${delay}ms (attempt ${retryCount + 1}/${maxRetries})...`);
     setTimeout(() => {
         try {
             trackChain(chainId);
-            console.log(`✅ Reconnection successful for chain ${chainId}`);
         }
         catch (error) {
             console.error(`❌ Reconnection attempt ${retryCount + 1} failed for chain ${chainId}:`, error.message);
@@ -51,20 +49,18 @@ const trackChain = (chainId) => {
     // Clean up existing connection if it exists (for reconnection)
     const existing = activeTracking.get(chainId);
     if (existing) {
-        console.log(`🧹 Cleaning up existing connection for chain ${chainId} before reconnecting...`);
         try {
             removeAllEventListeners(existing.contract);
             // Don't destroy provider here - let it be garbage collected naturally
             // Destroying might cause issues if it's still in use
         }
-        catch (err) {
-            console.warn(`⚠️ Error cleaning up existing connection for chain ${chainId}:`, err);
+        catch {
+            // Ignore cleanup errors
         }
         activeTracking.delete(chainId);
     }
     const ws_contract = (0, blockchain_1.getWsContract)(chainId);
     if (!ws_contract) {
-        console.warn(`⚠️ WebSocket contract not available for chain ${chainId}. Tracking disabled for this chain.`);
         activeTracking.delete(chainId);
         return;
     }
@@ -76,18 +72,6 @@ const trackChain = (chainId) => {
         contract: ws_contract,
         provider: wsProvider
     });
-    console.log(`🔍 Starting token trading tracking for chain ${chainId}...`);
-    console.log(`📡 WebSocket contract address: ${factoryAddress}`);
-    // Removed getNetwork() call - it causes timeouts and we already know the chainId
-    // The provider is created with chainId, so no need to verify via RPC call
-    // Just log the chainId we're using
-    const chainNames = {
-        1: 'Ethereum',
-        8453: 'Base',
-        42161: 'Arbitrum',
-        84532: 'Base Sepolia',
-    };
-    console.log(`🌐 Using chainId: ${chainId} (${chainNames[chainId] || 'Unknown'})`);
     // Helper function to safely parse price
     const calculatePrice = (amountIn, amountOut) => {
         try {
@@ -141,28 +125,17 @@ const trackChain = (chainId) => {
             const newVirtualEthReserves = args[6]; // FIXED: was args[5]
             const newVirtualTokenReserves = args[7]; // FIXED: was args[6]
             const eventLog = args[8]; // The event log object is at index 8
-            console.log(`✅ TokenBought Event Detected on chain ${chainId}`);
-            console.log(`   Token: ${tokenAddress}`);
-            console.log(`   Buyer: ${buyer}`);
-            console.log(`   Args length: ${args.length}`);
-            // Debug: Log event structure
-            console.log('🔍 Event log type:', typeof eventLog);
-            console.log('🔍 Event log keys:', eventLog && typeof eventLog === 'object' ? Object.keys(eventLog) : 'not an object');
             let txHash = undefined;
             let blockNumber = undefined;
             // Try to get from eventLog.log (ethers.js v6 structure)
             if (eventLog && typeof eventLog === 'object' && eventLog.log) {
                 txHash = eventLog.log.transactionHash || eventLog.log.hash;
                 blockNumber = eventLog.log.blockNumber;
-                if (txHash)
-                    console.log('   ✅ Found in eventLog.log');
             }
             // Try direct properties on eventLog
             if (!txHash && eventLog && typeof eventLog === 'object') {
                 txHash = eventLog.transactionHash || eventLog.hash;
                 blockNumber = eventLog.blockNumber;
-                if (txHash)
-                    console.log('   ✅ Found in eventLog direct');
             }
             // If still not found, try to get from the provider using the event filter
             if (!txHash || !blockNumber) {
@@ -181,16 +154,13 @@ const trackChain = (chainId) => {
                                 blockNumber = latestEvent.log.blockNumber;
                             if (!blockNumber && latestEvent.blockNumber)
                                 blockNumber = latestEvent.blockNumber;
-                            console.log('   ✅ Found from queryFilter');
                         }
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get from queryFilter:', err?.message || err);
+                catch {
+                    // Could not get from queryFilter - continue with other methods
                 }
             }
-            console.log(`   TX Hash: ${txHash || 'NOT FOUND'}`);
-            console.log(`   Block: ${blockNumber || 'NOT FOUND'}`);
             // Validate required fields
             if (!txHash) {
                 console.error('❌ TokenBought event missing txHash after all extraction attempts');
@@ -209,8 +179,8 @@ const trackChain = (chainId) => {
                     const block = await chainProvider.getBlock(blockNumber);
                     blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block timestamp:', err);
+                catch {
+                    // Could not get block timestamp - use current time
                 }
             }
             else if (txHash) {
@@ -221,11 +191,10 @@ const trackChain = (chainId) => {
                         blockNumber = receipt.blockNumber;
                         const block = await chainProvider.getBlock(blockNumber);
                         blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
-                        console.log(`   ✅ Got blockNumber and timestamp from receipt: ${blockNumber}`);
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block from receipt:', err);
+                catch {
+                    // Could not get block from receipt - use current time
                 }
             }
             const eventData = {
@@ -249,7 +218,6 @@ const trackChain = (chainId) => {
                 chainId: chainId,
             };
             await (0, handler_1.saveTradeEvent)(eventData, priceData);
-            console.log(`✅ TokenBought event processed successfully`);
         }
         catch (err) {
             console.error('❌ Error handling TokenBought event:', err);
@@ -274,9 +242,6 @@ const trackChain = (chainId) => {
             const newVirtualEthReserves = args[6]; // FIXED: was args[5]
             const newVirtualTokenReserves = args[7]; // FIXED: was args[6]
             const eventLog = args[8]; // The event log object is at index 8
-            console.log(`✅ TokenSold Event Detected on chain ${chainId}`);
-            console.log(`   Token: ${tokenAddress}`);
-            console.log(`   Seller: ${seller}`);
             let txHash = undefined;
             let blockNumber = undefined;
             // Try to get from eventLog.log
@@ -306,16 +271,13 @@ const trackChain = (chainId) => {
                                 blockNumber = latestEvent.log.blockNumber;
                             if (!blockNumber && latestEvent.blockNumber)
                                 blockNumber = latestEvent.blockNumber;
-                            console.log('   ✅ Found from queryFilter');
                         }
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get from queryFilter:', err?.message || err);
+                catch {
+                    // Could not get from queryFilter - continue with other methods
                 }
             }
-            console.log(`   TX Hash: ${txHash || 'NOT FOUND'}`);
-            console.log(`   Block: ${blockNumber || 'NOT FOUND'}`);
             if (!txHash) {
                 console.error('❌ TokenSold event missing txHash');
                 return;
@@ -331,8 +293,8 @@ const trackChain = (chainId) => {
                     const block = await chainProvider.getBlock(blockNumber);
                     blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block timestamp:', err);
+                catch {
+                    // Could not get block timestamp - use current time
                 }
             }
             else if (txHash) {
@@ -344,8 +306,8 @@ const trackChain = (chainId) => {
                         blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block from receipt:', err);
+                catch {
+                    // Could not get block from receipt - use current time
                 }
             }
             const eventData = {
@@ -369,7 +331,6 @@ const trackChain = (chainId) => {
                 chainId: chainId,
             };
             await (0, handler_1.saveTradeEvent)(eventData, priceData);
-            console.log(`✅ TokenSold event processed successfully`);
         }
         catch (err) {
             console.error('❌ Error handling TokenSold event:', err);
@@ -395,9 +356,6 @@ const trackChain = (chainId) => {
             const virtualTokenReserves = args[8];
             const graduationEth = args[9];
             const eventLog = args[10]; // The event log object is at index 10
-            console.log(`✅ TokenCreated Event Detected on chain ${chainId}`);
-            console.log(`   Token Address: ${tokenAddress}`);
-            console.log(`   Creator: ${creator}`);
             if (!tokenAddress) {
                 console.error('❌ TokenCreated event missing tokenAddress');
                 return;
@@ -431,16 +389,13 @@ const trackChain = (chainId) => {
                                 blockNumber = latestEvent.log.blockNumber;
                             if (!blockNumber && latestEvent.blockNumber)
                                 blockNumber = latestEvent.blockNumber;
-                            console.log('   ✅ Found from queryFilter');
                         }
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get from queryFilter:', err?.message || err);
+                catch {
+                    // Could not get from queryFilter - continue with other methods
                 }
             }
-            console.log(`   TX Hash: ${txHash || 'NOT FOUND'}`);
-            console.log(`   Block: ${blockNumber || 'NOT FOUND'}`);
             if (!txHash) {
                 console.error('❌ TokenCreated event missing txHash');
                 return;
@@ -463,8 +418,8 @@ const trackChain = (chainId) => {
                     const block = await chainProvider.getBlock(blockNumber);
                     blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block timestamp:', err);
+                catch {
+                    // Could not get block timestamp - use current time
                 }
             }
             else if (txHash) {
@@ -476,8 +431,8 @@ const trackChain = (chainId) => {
                         blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block from receipt:', err);
+                catch {
+                    // Could not get block from receipt - use current time
                 }
             }
             const priceData = {
@@ -488,7 +443,6 @@ const trackChain = (chainId) => {
                 chainId: chainId,
             };
             await (0, handler_1.saveCreatedEvent)(eventData, priceData);
-            console.log(`✅ Token creation event processed successfully`);
         }
         catch (err) {
             console.error('❌ Error handling TokenCreated event:', err);
@@ -501,9 +455,6 @@ const trackChain = (chainId) => {
             const tokenAddress = args[0];
             const graduationPrice = args[1];
             const eventLog = args[args.length - 1];
-            console.log(`✅ TokenGraduated Event Detected on chain ${chainId}`);
-            console.log(`   Token: ${tokenAddress}`);
-            console.log(`   Graduation Price: ${ethers_1.ethers.formatUnits(graduationPrice, 18)} ETH`);
             // Extract txHash and blockNumber from event log
             let txHash = undefined;
             let blockNumber = undefined;
@@ -541,8 +492,8 @@ const trackChain = (chainId) => {
                         }
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get from queryFilter:', err);
+                catch {
+                    // Could not get from queryFilter - continue with other methods
                 }
             }
             // Final fallback: Get from transaction receipt if we have txHash
@@ -553,8 +504,8 @@ const trackChain = (chainId) => {
                         blockNumber = receipt.blockNumber;
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block from receipt:', err);
+                catch {
+                    // Could not get block from receipt - continue
                 }
             }
             if (!txHash) {
@@ -568,8 +519,8 @@ const trackChain = (chainId) => {
                     const block = await chainProvider.getBlock(blockNumber);
                     blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block timestamp:', err);
+                catch {
+                    // Could not get block timestamp - use current time
                 }
             }
             else if (txHash) {
@@ -581,8 +532,8 @@ const trackChain = (chainId) => {
                         blockTimestamp = block?.timestamp ? new Date(block.timestamp * 1000) : new Date();
                     }
                 }
-                catch (err) {
-                    console.warn('⚠️ Could not get block from receipt:', err);
+                catch {
+                    // Could not get block from receipt - use current time
                 }
             }
             const eventData = {
@@ -596,7 +547,6 @@ const trackChain = (chainId) => {
                 chainId: chainId,
             };
             await (0, handler_1.saveGraduationEvent)(eventData);
-            console.log(`✅ TokenGraduated event processed successfully`);
         }
         catch (err) {
             console.error('❌ Error handling TokenGraduated event:', err);
@@ -609,11 +559,10 @@ const trackChain = (chainId) => {
             wsProvider.on('error', (error) => {
                 console.error(`❌ WebSocket provider error for chain ${chainId}:`, error);
                 console.error('   Error details:', error.message || error);
-                console.warn(`⚠️ Event tracking may be interrupted for chain ${chainId}. Check WebSocket connection.`);
             });
         }
-        catch (err) {
-            console.warn(`⚠️ Could not attach error handler to WebSocket provider for chain ${chainId}`);
+        catch {
+            // Could not attach error handler - non-critical
         }
         // Monitor connection health by checking the underlying WebSocket
         if (wsProvider.websocket) {
@@ -622,29 +571,17 @@ const trackChain = (chainId) => {
                 underlyingWs.on('error', (error) => {
                     console.error(`❌ Underlying WebSocket error for chain ${chainId}:`, error);
                 });
-                underlyingWs.on('close', (code, reason) => {
-                    console.warn(`⚠️ WebSocket connection closed for chain ${chainId}. Code: ${code}`);
-                    if (reason) {
-                        console.warn(`   Reason: ${reason.toString()}`);
-                    }
+                underlyingWs.on('close', (code) => {
                     // Remove from active tracking
                     activeTracking.delete(chainId);
                     // Attempt to reconnect (only if not a normal closure)
                     if (code !== 1000) { // 1000 = normal closure (don't reconnect)
-                        console.log(`🔄 Attempting to reconnect WebSocket for chain ${chainId}...`);
                         reconnectWebSocket(chainId, 0);
                     }
-                    else {
-                        console.log(`ℹ️ WebSocket closed normally for chain ${chainId}. No reconnection needed.`);
-                    }
-                });
-                underlyingWs.on('open', () => {
-                    console.log(`✅ WebSocket connection established for chain ${chainId}`);
                 });
             }
         }
     }
-    console.log(`✅ Token trading tracking initialized for chain ${chainId}`);
 };
 /**
  * Track events for all configured chains
@@ -652,10 +589,8 @@ const trackChain = (chainId) => {
 const trackTrading = () => {
     const configuredChains = (0, blockchain_1.getConfiguredChains)();
     if (configuredChains.length === 0) {
-        console.warn('⚠️ No chains configured. Trading tracking disabled.');
         return;
     }
-    console.log(`🔍 Starting multi-chain token trading tracking for ${configuredChains.length} chain(s)...`);
     // Track events for each configured chain
     for (const chainId of configuredChains) {
         try {
@@ -665,7 +600,6 @@ const trackTrading = () => {
             console.error(`❌ Failed to initialize tracking for chain ${chainId}:`, error.message);
         }
     }
-    console.log('✅ Multi-chain token trading tracking initialization complete');
 };
 exports.trackTrading = trackTrading;
 //# sourceMappingURL=track.js.map

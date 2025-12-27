@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -6,9 +39,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const ethers_1 = require("ethers");
 const auth_1 = require("../middleware/auth");
+const activityService_1 = require("../services/activityService");
+const blockchain_1 = require("../config/blockchain");
 const router = express_1.default.Router();
 // Helper functions (same as tokenCreation.ts)
-function getRpcUrl(chainId) {
+// @ts-expect-error - Function is intentionally unused but kept for future use
+function _getRpcUrl(chainId) {
     const envKey = getRpcUrlEnvKey(chainId);
     return process.env[envKey] || process.env.RPC_URL || null;
 }
@@ -64,11 +100,6 @@ router.post('/withdraw', auth_1.authenticateToken, async (req, res) => {
                 error: 'No embedded wallet found. Please connect a wallet to withdraw funds.'
             });
         }
-        // Get RPC URL
-        const rpcUrl = getRpcUrl(chainId);
-        if (!rpcUrl) {
-            return res.status(400).json({ error: `RPC URL not configured for chain ${chainId}` });
-        }
         // Generate wallet from user credentials
         const userId = user._id.toString();
         const userEmail = user.email.toLowerCase().trim();
@@ -81,8 +112,8 @@ router.post('/withdraw', auth_1.authenticateToken, async (req, res) => {
             embeddedWallet.address = wallet.address.toLowerCase();
             await user.save();
         }
-        // Connect to provider
-        const provider = new ethers_1.ethers.JsonRpcProvider(rpcUrl);
+        // Connect to provider (using getProvider to ensure staticNetwork option is set)
+        const provider = (0, blockchain_1.getProvider)(chainId);
         const signer = wallet.connect(provider);
         // Check balance
         const balance = await provider.getBalance(wallet.address);
@@ -112,6 +143,90 @@ router.post('/withdraw', auth_1.authenticateToken, async (req, res) => {
             nonce: nonce,
         });
         const receipt = await tx.wait();
+        // Get block timestamp
+        let blockTimestamp = new Date();
+        if (receipt?.blockNumber) {
+            try {
+                const block = await provider.getBlock(receipt.blockNumber);
+                if (block?.timestamp) {
+                    blockTimestamp = new Date(block.timestamp * 1000);
+                }
+            }
+            catch (error) {
+                console.error('Error getting block timestamp:', error);
+                // Use current time as fallback
+            }
+        }
+        // Calculate actual gas cost from receipt
+        const gasUsed = receipt?.gasUsed?.toString() || '0';
+        const actualGasCost = receipt ? (receipt.gasUsed * receipt.gasPrice).toString() : '0';
+        // Save withdrawal activity
+        try {
+            await (0, activityService_1.saveActivity)({
+                type: 'withdraw',
+                walletAddress: wallet.address,
+                fromAddress: wallet.address,
+                toAddress: toAddress,
+                amount: withdrawAmount.toString(),
+                txHash: tx.hash,
+                blockNumber: receipt?.blockNumber || 0,
+                blockTimestamp: blockTimestamp,
+                chainId: chainId,
+                status: 'confirmed',
+                gasUsed: gasUsed,
+                gasCost: actualGasCost,
+                userId: user._id.toString()
+            });
+            // Emit WebSocket events for real-time updates
+            try {
+                const { emitWithdrawDetected, emitBalanceUpdate } = await Promise.resolve().then(() => __importStar(require('../socket/updateEmitter')));
+                // Emit withdraw detected event
+                emitWithdrawDetected({
+                    walletAddress: wallet.address,
+                    toAddress: toAddress,
+                    amount: withdrawAmount.toString(),
+                    amountFormatted: ethers_1.ethers.formatEther(withdrawAmount),
+                    txHash: tx.hash,
+                    blockNumber: receipt?.blockNumber || 0,
+                    blockTimestamp: blockTimestamp,
+                    chainId: chainId,
+                    userId: user._id.toString()
+                });
+                // Fetch fresh balance and emit balance update (Binance-like approach)
+                try {
+                    const freshBalance = await provider.getBalance(wallet.address);
+                    const balanceFormatted = ethers_1.ethers.formatEther(freshBalance);
+                    emitBalanceUpdate({
+                        walletAddress: wallet.address,
+                        balance: freshBalance.toString(),
+                        balanceFormatted: balanceFormatted,
+                        chainId: chainId,
+                        userId: user._id.toString(),
+                    });
+                    console.log(`✅ Balance update sent to user ${user._id} after withdrawal`, {
+                        walletAddress: wallet.address,
+                        balance: balanceFormatted,
+                        chainId
+                    });
+                }
+                catch (balanceError) {
+                    // Don't fail withdrawal if balance fetch fails
+                    console.warn(`Failed to fetch/emit balance update after withdrawal`, {
+                        error: balanceError.message,
+                        walletAddress: wallet.address,
+                        chainId
+                    });
+                }
+            }
+            catch (wsError) {
+                // Log error but don't fail the withdrawal
+                console.error('Error emitting WebSocket events for withdrawal:', wsError);
+            }
+        }
+        catch (activityError) {
+            // Log error but don't fail the withdrawal
+            console.error('Error saving withdrawal activity:', activityError);
+        }
         res.json({
             success: true,
             txHash: tx.hash,

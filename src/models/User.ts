@@ -10,7 +10,7 @@ const userSchema = new Schema<IUser>({
     unique: true,
     trim: true,
     minlength: 3,
-    maxlength: 30
+    maxlength: 15
   },
   email: {
     type: String,
@@ -67,7 +67,7 @@ const userSchema = new Schema<IUser>({
   },
   bio: {
     type: String,
-    maxlength: 500,
+    maxlength: 200,
     default: ''
   },
   

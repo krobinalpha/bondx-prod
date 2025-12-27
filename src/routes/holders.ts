@@ -10,7 +10,7 @@ const router = express.Router();
 router.get('/token/:tokenAddress', [
   param('tokenAddress').custom(validateAddress).withMessage('Invalid token address'),
   query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
-  query('pageSize').optional().isInt({ min: 1, max: 1000 }).withMessage('Page size must be between 1 and 1000'),
+  query('pageSize').optional().isInt({ min: 1, max: 100 }).withMessage('Page size must be between 1 and 100'),
   query('chainId').optional().isInt({ min: 1 }).withMessage('Invalid chain ID')
 ], async (req: Request, res: Response): Promise<Response | void> => {
   try {
@@ -20,7 +20,7 @@ router.get('/token/:tokenAddress', [
     }
 
     const { tokenAddress } = req.params;
-    const { page = 1, pageSize = 100, chainId } = req.query; // Increased default from 25 to 100
+    const { page = 1, pageSize = 50, chainId } = req.query; // Default 50, max 100 for better performance
 
     // Build query
     const query: any = { 
@@ -175,7 +175,7 @@ router.get('/address/:holderAddress/batch', [
 
     // Get all holders (no pagination for batch endpoint - frontend can paginate)
     const holders = await TokenHolder.find(query)
-      .populate('tokenId', 'name symbol address chainId logo totalSupply currentPrice marketCap graduationProgress')
+      .populate('tokenId', 'name symbol address chainId logo totalSupply currentPrice marketCap graduationProgress createdAt description creatorAddress website twitter telegram discord youtube')
       .sort({ balance: -1 })
       .lean();
 
@@ -183,21 +183,30 @@ router.get('/address/:holderAddress/batch', [
     const tokens = holders
       .filter((holder: any) => holder.tokenId && holder.balance && BigInt(holder.balance) > 0n)
       .map((holder: any) => ({
-        address: holder.tokenAddress,
-        token_address: holder.tokenAddress,
-        symbol: holder.tokenId?.symbol || 'Unknown',
-        name: holder.tokenId?.name || 'Unknown',
-        balance: holder.balance,
-        balanceUSD: holder.balanceUSD || '0',
-        percentage: holder.percentage || 0,
-        chainId: holder.chainId,
-        logo: holder.tokenId?.logo || '/chats/noimg.svg',
-        // Include token details to reduce frontend API calls
-        totalSupply: holder.tokenId?.totalSupply || '0',
-        currentPrice: holder.tokenId?.currentPrice || '0',
-        marketCap: holder.tokenId?.marketCap || '0',
-        graduationProgress: holder.tokenId?.graduationProgress || '0'
-      }));
+      address: holder.tokenAddress,
+      token_address: holder.tokenAddress,
+      symbol: holder.tokenId?.symbol || 'Unknown',
+      name: holder.tokenId?.name || 'Unknown',
+      balance: holder.balance,
+      balanceUSD: holder.balanceUSD || '0',
+      percentage: holder.percentage || 0,
+      chainId: holder.chainId,
+      logo: holder.tokenId?.logo || '/chats/noimg.svg',
+      // Include token details to reduce frontend API calls
+      totalSupply: holder.tokenId?.totalSupply || '0',
+      currentPrice: holder.tokenId?.currentPrice || '0',
+      marketCap: holder.tokenId?.marketCap || '0',
+      graduationProgress: holder.tokenId?.graduationProgress || '0',
+      // Add missing fields
+      createdAt: holder.tokenId?.createdAt ? new Date(holder.tokenId.createdAt).toISOString() : '',
+      description: holder.tokenId?.description || '',
+      creatorAddress: holder.tokenId?.creatorAddress || '',
+      website: holder.tokenId?.website || '',
+      twitter: holder.tokenId?.twitter || '',
+      telegram: holder.tokenId?.telegram || '',
+      discord: holder.tokenId?.discord || '',
+      youtube: holder.tokenId?.youtube || '',
+    }));
 
     res.json({
       result: tokens,

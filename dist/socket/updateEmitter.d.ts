@@ -9,6 +9,7 @@ export declare function initUpdateEmitter(io: Server): void;
  */
 export declare function emitTokenPriceUpdate(tokenAddress: string, data: {
     price: string;
+    priceUSD?: string;
     timestamp: Date | string;
     chainId: number;
 }): void;
@@ -98,5 +99,49 @@ export declare function emitTokenTraded(data: {
         balanceUSD?: string;
         percentage?: number;
     }>;
+}): void;
+/**
+ * Emit depositDetected event when a deposit is detected for an embedded wallet
+ * This enables real-time notifications and balance updates in the frontend
+ * Emits to user-specific room if userId is provided, otherwise broadcasts
+ */
+export declare function emitDepositDetected(data: {
+    walletAddress: string;
+    fromAddress: string;
+    amount: string;
+    amountFormatted?: string;
+    txHash: string;
+    blockNumber: number;
+    blockTimestamp: Date | string;
+    chainId: number;
+    userId?: string;
+}): void;
+/**
+ * Emit withdrawDetected event when a withdrawal is detected for an embedded wallet
+ * This enables real-time notifications and balance updates in the frontend
+ * Emits to user-specific room if userId is provided, otherwise broadcasts
+ */
+export declare function emitWithdrawDetected(data: {
+    walletAddress: string;
+    toAddress: string;
+    amount: string;
+    amountFormatted?: string;
+    txHash: string;
+    blockNumber: number;
+    blockTimestamp: Date | string;
+    chainId: number;
+    userId?: string;
+}): void;
+/**
+ * Emit balanceUpdate event when balance changes (after deposit/withdraw)
+ * This enables real-time balance updates in the frontend (Binance-like approach)
+ * Balance is fetched fresh from blockchain after database update
+ */
+export declare function emitBalanceUpdate(data: {
+    walletAddress: string;
+    balance: string;
+    balanceFormatted: string;
+    chainId: number;
+    userId: string;
 }): void;
 //# sourceMappingURL=updateEmitter.d.ts.map

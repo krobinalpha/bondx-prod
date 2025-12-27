@@ -133,6 +133,27 @@ export interface ITransaction extends Document {
   calculateGasCostUSD(ethPriceUSD: string): Promise<ITransaction>;
 }
 
+// Activity Interface (for deposit/withdraw tracking)
+export interface IActivity extends Document {
+  _id: Types.ObjectId;
+  type: 'deposit' | 'withdraw';
+  walletAddress: string;
+  fromAddress: string;
+  toAddress: string;
+  amount: string;
+  amountUSD: string;
+  txHash: string;
+  blockNumber: number;
+  blockTimestamp: Date;
+  chainId: number;
+  status: 'pending' | 'confirmed' | 'failed';
+  gasUsed: string;
+  gasCost: string;
+  userId: Types.ObjectId | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // Liquidity Event Interface
 export interface ILiquidityEvent extends Document {
   _id: Types.ObjectId;
@@ -204,6 +225,11 @@ export interface IChatMessage extends Document {
   message: string;
   reply_to: number | null;
   timestamp: Date;
+  editedAt?: Date;
+  // Note: isDeleted and deletedAt fields exist in schema for backward compatibility
+  // but are not used in new code (hard delete is used instead)
+  isDeleted?: boolean;
+  deletedAt?: Date;
 }
 
 // JWT Payload

@@ -63,7 +63,6 @@ export async function sendEmail(options: EmailOptions): Promise<void> {
 
   try {
     await sgMail.send(msg);
-    console.log(`✅ Email sent successfully to ${options.to}`);
   } catch (error: any) {
     // Enhanced error logging
     const errorDetails = {

@@ -22,7 +22,7 @@ const chatMessageSchema = new Schema<IChatMessage>({
     type: String,
     required: true,
     trim: true,
-    maxlength: 1000
+    maxlength: 100
   },
   reply_to: {
     type: Schema.Types.ObjectId,
@@ -32,6 +32,18 @@ const chatMessageSchema = new Schema<IChatMessage>({
   timestamp: {
     type: Date,
     default: Date.now
+  },
+  editedAt: {
+    type: Date,
+    default: null
+  },
+  isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  deletedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: false

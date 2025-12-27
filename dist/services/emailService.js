@@ -55,7 +55,6 @@ async function sendEmail(options) {
     };
     try {
         await mail_1.default.send(msg);
-        console.log(`✅ Email sent successfully to ${options.to}`);
     }
     catch (error) {
         // Enhanced error logging

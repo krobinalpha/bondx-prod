@@ -46,7 +46,7 @@ export const validateEmail = (value: string): boolean => {
 // Validate username format
 export const validateUsername = (value: string): boolean => {
   if (!value) return false;
-  const usernameRegex = /^[a-zA-Z0-9_]{3,30}$/;
+  const usernameRegex = /^[a-zA-Z0-9_]{3,15}$/;
   return usernameRegex.test(value);
 };
 
@@ -101,9 +101,9 @@ export const validateDateRange = (startDate: string, endDate: string): boolean =
 export const validateTokenMetadata = (metadata: { name?: string; symbol?: string; description?: string }): boolean => {
   const { name, symbol, description } = metadata;
   
-  if (!name || name.length < 1 || name.length > 100) return false;
-  if (!symbol || symbol.length < 1 || symbol.length > 10) return false;
-  if (description && description.length > 1000) return false;
+  if (!name || name.length < 1 || name.length > 10) return false;
+  if (!symbol || symbol.length < 1 || symbol.length > 7) return false;
+  if (description && description.length > 200) return false;
   
   return true;
 };

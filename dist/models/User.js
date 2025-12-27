@@ -46,7 +46,7 @@ const userSchema = new mongoose_1.Schema({
         unique: true,
         trim: true,
         minlength: 3,
-        maxlength: 30
+        maxlength: 15
     },
     email: {
         type: String,
@@ -100,7 +100,7 @@ const userSchema = new mongoose_1.Schema({
     },
     bio: {
         type: String,
-        maxlength: 500,
+        maxlength: 200,
         default: ''
     },
     // Social links

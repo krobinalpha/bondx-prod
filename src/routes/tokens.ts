@@ -349,7 +349,6 @@ router.get('/address/:address/info-and-transactions', [
     const { address } = req.params;
     const { transactionPage = 1, transactionPageSize = 10, chainId } = req.query;
     
-    console.log(`[Token Route] Fetching token: ${address}, chainId: ${chainId}`);
     
     // Build token query with chainId if provided
     const tokenQuery: any = { address: address.toLowerCase() };
@@ -357,7 +356,6 @@ router.get('/address/:address/info-and-transactions', [
       tokenQuery.chainId = parseInt(chainId as string);
     }
     
-    console.log(`[Token Route] Query:`, tokenQuery);
     
     const token = await Token.findOne(tokenQuery)
       .populate('liquidityEventsCount')
@@ -366,7 +364,6 @@ router.get('/address/:address/info-and-transactions', [
       .lean(); // Use lean() to get plain JavaScript object
 
     if (!token) {
-      console.log(`[Token Route] Token not found for address: ${address}, chainId: ${chainId}`);
       return res.status(404).json({ 
         error: 'Token not found',
         address: address.toLowerCase(),
@@ -438,7 +435,6 @@ router.patch('/updateToken', [
     if (!token) {
       // Token doesn't exist yet - create it with basic info from data
       // This handles the case where frontend calls updateToken before backend event listener processes it
-      console.log(`Token ${normalizedAddress} not found, creating new token record...`);
       
       // Validate required fields
       if (!data.name || !data.symbol || !data.creatorAddress) {
@@ -464,7 +460,6 @@ router.patch('/updateToken', [
         isActive: true,
       });
 
-      console.log(`Created new token record: ${normalizedAddress}`);
       
       // ✅ CREATE HOLDER SYNCHRONOUSLY BEFORE SENDING RESPONSE
       // This ensures holder exists when frontend redirects
@@ -491,7 +486,6 @@ router.patch('/updateToken', [
               transactionCount: 0,
               chainId: token.chainId
             });
-            console.log(`✅ Initial bonding curve holder created via updateToken API: ${bondingCurveAddress}`);
             
             // Recalculate percentages
             await recalculatePercentages(normalizedAddress, totalSupply, token.chainId);
@@ -499,7 +493,6 @@ router.patch('/updateToken', [
         }
       } catch (holderError: any) {
         // Log but don't fail - WebSocket event handler will create it as fallback
-        console.warn('⚠️ Could not create holder via updateToken API (will be created by event handler):', holderError.message);
       }
     } else {
       // Token exists - update it with new data
@@ -516,7 +509,6 @@ router.patch('/updateToken', [
       }
       
       await token.save();
-      console.log(`Updated existing token: ${normalizedAddress}`);
     }
 
     res.json({ data: token });
@@ -762,7 +754,6 @@ router.get('/address/:address/user-balance', [
           // Contract doesn't exist at this address
           // Only warn if token exists in DB (unexpected) or in development
           if (token || process.env.NODE_ENV === 'development') {
-            console.warn(`⚠️ No contract found at address ${tokenAddress} on chain ${targetChainId}${token ? ' (token exists in DB)' : ''}`);
           }
         } else {
           // Contract exists, try to call balanceOf
@@ -774,7 +765,6 @@ router.get('/address/:address/user-balance', [
         // If balanceOf fails, return 0 balance
         // Only log error if token exists in DB (unexpected failure)
         if (token) {
-          console.warn(`⚠️ Failed to get token balance for ${tokenAddress}:`, balanceError.message);
         }
         tokenBalance = 0n;
         tokenBalanceFormatted = '0';

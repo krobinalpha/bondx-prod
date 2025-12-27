@@ -11,16 +11,13 @@ const blockchain_1 = require("../config/blockchain");
 const syncTrade = async () => {
     const configuredChains = (0, blockchain_1.getConfiguredChains)();
     if (configuredChains.length === 0) {
-        console.warn('⚠️ No chains configured. Sync disabled.');
         return;
     }
-    console.log(`🔄 Starting multi-chain sync for ${configuredChains.length} chain(s)...`);
     // Sync each configured chain independently
     for (const chainId of configuredChains) {
         const chainProvider = (0, blockchain_1.getProvider)(chainId);
         let startBlock = Number(process.env.SYNC_START_BLOCK) || 0;
         const intervalSize = Number(process.env.SYNC_INTERVAL_SIZE) || 100;
-        console.log(`📡 Starting sync for chain ${chainId} from block ${startBlock}`);
         const checkingCycle = node_cron_1.default.schedule('*/10 * * * * *', async () => {
             try {
                 const latestBlock = await chainProvider.getBlockNumber();
@@ -30,7 +27,6 @@ const syncTrade = async () => {
                 startBlock = endBlock + 1;
                 // Stop if caught up
                 if (startBlock >= latestBlock) {
-                    console.log(`✅ Sync complete for chain ${chainId} — reached latest block ${latestBlock}.`);
                     checkingCycle.stop();
                 }
             }

@@ -1,6 +1,8 @@
 import { ethers } from 'ethers';
+export declare function getWsUrl(chainId: number): string | undefined;
 /**
  * Create provider dynamically for a given chainId
+ * With staticNetwork option to prevent network detection errors and timeouts
  */
 export declare function getProvider(chainId: number): ethers.JsonRpcProvider;
 /**
@@ -11,6 +13,14 @@ export declare function getFactoryAddressForChain(chainId: number): string;
  * Create contract instance dynamically for a given chainId
  */
 export declare function getContract(chainId: number): ethers.Contract;
+declare const wsProviderCache: Map<number, ethers.WebSocketProvider>;
+interface WsConnectionAttempt {
+    count: number;
+    lastAttempt: number;
+    backoffUntil: number;
+}
+declare const wsConnectionAttempts: Map<number, WsConnectionAttempt>;
+export { wsConnectionAttempts, wsProviderCache };
 /**
  * Create WebSocket provider dynamically for a given chainId
  * Caches providers to prevent multiple connections

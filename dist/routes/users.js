@@ -4,8 +4,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
+const express_validator_1 = require("express-validator");
 const User_1 = __importDefault(require("../models/User"));
 const auth_1 = require("../middleware/auth");
+const validation_1 = require("../middleware/validation");
 const router = express_1.default.Router();
 // Helper function to generate random username (same as in auth.ts)
 // Format: bondx_{7 hex digits} - 268.4 million combinations
@@ -53,7 +55,6 @@ router.get('/:address', async (req, res) => {
         if (!user.username || user.username.trim() === '') {
             user.username = await generateRandomUsername();
             await user.save();
-            console.log(`✅ Generated random username for user ${user._id}: ${user.username}`);
         }
         res.json({
             id: user._id,
@@ -79,8 +80,20 @@ router.get('/:address', async (req, res) => {
     }
 });
 // PATCH /api/users/profile - Update user profile
-router.patch('/profile', auth_1.authenticateToken, async (req, res) => {
+router.patch('/profile', auth_1.authenticateToken, [
+    (0, express_validator_1.body)('username').optional().trim().custom((value) => {
+        if (value !== undefined && !(0, validation_1.validateUsername)(value)) {
+            throw new Error('Username must be 3-15 characters, alphanumeric and underscores only');
+        }
+        return true;
+    }),
+    (0, express_validator_1.body)('bio').optional().trim().isLength({ max: 200 }).withMessage('Bio must not exceed 200 characters'),
+], async (req, res) => {
     try {
+        const errors = (0, express_validator_1.validationResult)(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
         const userId = req.user._id.toString();
         const { username, bio, avatar, website, twitter, telegram, discord, github } = req.body;
         const user = await User_1.default.findById(userId);
@@ -100,7 +113,7 @@ router.patch('/profile', auth_1.authenticateToken, async (req, res) => {
             user.username = username.trim();
         }
         if (bio !== undefined) {
-            user.bio = bio.substring(0, 500); // Enforce max length
+            user.bio = bio.substring(0, 200); // Enforce max length
         }
         if (avatar !== undefined) {
             user.avatar = avatar;

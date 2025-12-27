@@ -13,7 +13,7 @@ const router = express_1.default.Router();
 router.get('/token/:tokenAddress', [
     (0, express_validator_1.param)('tokenAddress').custom(validation_1.validateAddress).withMessage('Invalid token address'),
     (0, express_validator_1.query)('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer'),
-    (0, express_validator_1.query)('pageSize').optional().isInt({ min: 1, max: 1000 }).withMessage('Page size must be between 1 and 1000'),
+    (0, express_validator_1.query)('pageSize').optional().isInt({ min: 1, max: 100 }).withMessage('Page size must be between 1 and 100'),
     (0, express_validator_1.query)('chainId').optional().isInt({ min: 1 }).withMessage('Invalid chain ID')
 ], async (req, res) => {
     try {
@@ -22,7 +22,7 @@ router.get('/token/:tokenAddress', [
             return res.status(400).json({ errors: errors.array() });
         }
         const { tokenAddress } = req.params;
-        const { page = 1, pageSize = 100, chainId } = req.query; // Increased default from 25 to 100
+        const { page = 1, pageSize = 50, chainId } = req.query; // Default 50, max 100 for better performance
         // Build query
         const query = {
             tokenAddress: tokenAddress.toLowerCase()
@@ -162,7 +162,7 @@ router.get('/address/:holderAddress/batch', [
         }
         // Get all holders (no pagination for batch endpoint - frontend can paginate)
         const holders = await TokenHolder_1.default.find(query)
-            .populate('tokenId', 'name symbol address chainId logo totalSupply currentPrice marketCap graduationProgress')
+            .populate('tokenId', 'name symbol address chainId logo totalSupply currentPrice marketCap graduationProgress createdAt description creatorAddress website twitter telegram discord youtube')
             .sort({ balance: -1 })
             .lean();
         // Format response with full token details
@@ -182,7 +182,16 @@ router.get('/address/:holderAddress/batch', [
             totalSupply: holder.tokenId?.totalSupply || '0',
             currentPrice: holder.tokenId?.currentPrice || '0',
             marketCap: holder.tokenId?.marketCap || '0',
-            graduationProgress: holder.tokenId?.graduationProgress || '0'
+            graduationProgress: holder.tokenId?.graduationProgress || '0',
+            // Add missing fields
+            createdAt: holder.tokenId?.createdAt ? new Date(holder.tokenId.createdAt).toISOString() : '',
+            description: holder.tokenId?.description || '',
+            creatorAddress: holder.tokenId?.creatorAddress || '',
+            website: holder.tokenId?.website || '',
+            twitter: holder.tokenId?.twitter || '',
+            telegram: holder.tokenId?.telegram || '',
+            discord: holder.tokenId?.discord || '',
+            youtube: holder.tokenId?.youtube || '',
         }));
         res.json({
             result: tokens,

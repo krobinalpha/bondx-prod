@@ -38,12 +38,15 @@ router.get('/token/:tokenAddress', [
     const histories = await TokenHistory.find(query)
       .sort({ timestamp: 1 }) // Ascending order (oldest to newest) for proper chart display
       .limit(parseInt(limit as string))
-      .select('tokenPrice timestamp blockNumber')
+      .select('tokenPrice priceUSD marketCap marketCapUSD timestamp blockNumber')
       .lean();
 
-    // Format response to match frontend expectations - return just price
+    // Format response to include both price and market cap data
     const formattedHistories = histories.map(history => ({
       price: history.tokenPrice || '0',
+      priceUSD: history.priceUSD || '0',
+      marketCap: history.marketCap || '0',
+      marketCapUSD: history.marketCapUSD || '0',
       timestamp: history.timestamp?.toISOString() || new Date().toISOString(),
       blockNumber: history.blockNumber || 0
     }));

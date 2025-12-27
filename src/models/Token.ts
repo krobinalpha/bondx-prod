@@ -10,13 +10,13 @@ const tokenSchema = new Schema<IToken>({
     type: String,
     required: true,
     trim: true,
-    maxlength: 100
+    maxlength: 10
   },
   symbol: {
     type: String,
     required: true,
     trim: true,
-    maxlength: 10,
+    maxlength: 7,
     uppercase: true
   },
   address: {
@@ -57,7 +57,7 @@ const tokenSchema = new Schema<IToken>({
   },
   description: {
     type: String,
-    maxlength: 1000,
+    maxlength: 200,
     default: ''
   },
   

@@ -12,6 +12,7 @@ const TokenHolder_1 = __importDefault(require("../models/TokenHolder"));
 const LiquidityEvent_1 = __importDefault(require("../models/LiquidityEvent"));
 const blockchain_1 = require("../config/blockchain");
 const updateEmitter_1 = require("../socket/updateEmitter");
+const ethPriceService_1 = require("../services/ethPriceService");
 // Helper function to validate and normalize price
 const validatePrice = (price, context = '') => {
     if (!price)
@@ -45,7 +46,6 @@ const updateOrCreateHolder = async (tokenId, tokenAddress, holderAddress, balanc
                 existingHolder.firstTransactionHash = txHash.toLowerCase();
             }
             await existingHolder.save();
-            console.log(`✅ Holder updated: ${holderAddress} balance: ${balance}`);
         }
         else {
             // Create new holder
@@ -59,7 +59,6 @@ const updateOrCreateHolder = async (tokenId, tokenAddress, holderAddress, balanc
                 transactionCount: 1,
                 chainId: chainId
             });
-            console.log(`✅ Holder created: ${holderAddress} balance: ${balance}`);
         }
     }
     catch (error) {
@@ -71,7 +70,6 @@ const updateOrCreateHolder = async (tokenId, tokenAddress, holderAddress, balanc
 const recalculatePercentages = async (tokenAddress, totalSupply, chainId) => {
     try {
         if (!totalSupply || totalSupply === '0') {
-            console.warn(`⚠️ Cannot recalculate percentages: totalSupply is 0 for ${tokenAddress}`);
             return;
         }
         const holders = await TokenHolder_1.default.find({
@@ -90,7 +88,6 @@ const recalculatePercentages = async (tokenAddress, totalSupply, chainId) => {
             // This will be updated elsewhere if price is available
             await holder.save();
         }
-        console.log(`✅ Percentages recalculated for ${holders.length} holders of ${tokenAddress}`);
     }
     catch (error) {
         console.error(`❌ Error recalculating percentages for ${tokenAddress}:`, error.message);
@@ -121,7 +118,6 @@ const saveTradeEvent = async (eventData, priceData) => {
             chainId: chainId
         });
         if (!token) {
-            console.warn(`Token not found for transaction: ${eventData.tokenAddress} on chain ${chainId}`);
             return;
         }
         // Update graduation progress if newEthReserves is available
@@ -134,13 +130,9 @@ const saveTradeEvent = async (eventData, priceData) => {
                 const graduationProgress = (newEthReserves * (10n ** 18n)) / graduationEth;
                 token.graduationProgress = graduationProgress.toString();
                 await token.save();
-                console.log(`✅ Graduation progress updated: ${token.graduationProgress} for token ${token.address}`);
                 // Check if token is ready to graduate and call graduateTokenManually
                 // Only check if token is still active (not already graduated)
                 if (newEthReserves >= graduationEth && token.isActive) {
-                    console.log(`🎓 Token ${token.address} reached graduation threshold on chain ${chainId}! Calling graduateTokenManually...`);
-                    console.log(`   realEthReserves: ${ethers_1.ethers.formatEther(newEthReserves)} ETH`);
-                    console.log(`   graduationEth: ${ethers_1.ethers.formatEther(graduationEth)} ETH`);
                     // Call graduateTokenManually asynchronously (don't block the event processing)
                     graduateTokenManually(token.address, chainId).catch((error) => {
                         console.error(`❌ Error calling graduateTokenManually for ${token.address} on chain ${chainId}:`, error.message);
@@ -163,36 +155,84 @@ const saveTradeEvent = async (eventData, priceData) => {
                 tokenPrice: priceData?.tokenPrice ? String(priceData.tokenPrice) : '0', // Include tokenPrice from priceData
             };
             await Transaction_1.default.create(transactionData);
-            console.log(`✅ Transaction saved:`, transactionData.txHash);
         }
         else if (priceData?.tokenPrice && (!existingTx.tokenPrice || existingTx.tokenPrice === '0')) {
             // Update existing transaction with tokenPrice if it's missing or zero
             existingTx.tokenPrice = String(priceData.tokenPrice);
             await existingTx.save();
-            console.log(`✅ Transaction tokenPrice updated:`, existingTx.txHash);
         }
         // Save price history if it doesn't exist
         if (priceData) {
+            // Fetch ETH price for USD calculations
+            let ethPriceUSD = '0';
+            try {
+                ethPriceUSD = await (0, ethPriceService_1.getEthPriceUSD)();
+            }
+            catch (error) {
+                console.error('❌ Error fetching ETH price in saveTradeEvent:', error.message);
+                // Continue with ETH-only values if USD calculation fails
+            }
             const existingPrice = await TokenHistory_1.default.findOne({
                 tokenAddress: priceData.tokenAddress?.toLowerCase(),
                 chainId: chainId,
                 timestamp: priceData.timestamp
             });
             if (!existingPrice) {
+                // Calculate USD values for TokenHistory
+                const tokenPrice = String(priceData.tokenPrice || '0');
+                let priceUSD = '0';
+                let marketCapUSD = '0';
+                if (tokenPrice !== '0' && ethPriceUSD !== '0') {
+                    try {
+                        const ethPrice = parseFloat(ethPriceUSD);
+                        // tokenPrice is in ETH (decimal string), convert to USD
+                        priceUSD = (parseFloat(tokenPrice) * ethPrice).toString();
+                    }
+                    catch (err) {
+                    }
+                }
+                // Calculate marketCap in ETH first, then convert to USD
+                let marketCap = '0';
+                if (token.totalSupply && tokenPrice !== '0') {
+                    try {
+                        const supply = BigInt(token.totalSupply);
+                        const priceInWei = ethers_1.ethers.parseUnits(tokenPrice, 18);
+                        marketCap = ((supply * priceInWei) / (10n ** 18n)).toString();
+                        if (marketCap !== '0' && ethPriceUSD !== '0') {
+                            const ethPrice = parseFloat(ethPriceUSD);
+                            // marketCap is in wei, convert to ETH first, then to USD
+                            const marketCapInEth = Number(marketCap) / 1e18;
+                            marketCapUSD = (marketCapInEth * ethPrice).toString();
+                        }
+                    }
+                    catch (err) {
+                    }
+                }
                 const historyData = {
                     ...priceData,
                     tokenId: token._id,
                     tokenAddress: priceData.tokenAddress?.toLowerCase(),
-                    tokenPrice: String(priceData.tokenPrice || '0'),
-                    priceUSD: String(priceData.priceUSD || '0'),
+                    tokenPrice: tokenPrice,
+                    priceUSD: priceUSD,
+                    marketCap: marketCap,
+                    marketCapUSD: marketCapUSD,
                     chainId: chainId,
                 };
                 await TokenHistory_1.default.create(historyData);
-                console.log('✅ Price history saved', historyData.tokenAddress);
                 // Update Token's currentPrice with the validated price
                 const validatedPrice = validatePrice(priceData.tokenPrice, 'in saveTradeEvent (new history)');
                 if (validatedPrice !== '0') {
                     token.currentPrice = validatedPrice;
+                    // Calculate USD price
+                    try {
+                        const ethPrice = parseFloat(ethPriceUSD);
+                        if (ethPrice > 0) {
+                            token.currentPriceUSD = (parseFloat(validatedPrice) * ethPrice).toString();
+                        }
+                    }
+                    catch (err) {
+                        token.currentPriceUSD = '0';
+                    }
                 }
                 // Calculate and update marketCap if totalSupply is available
                 // currentPrice is stored as decimal string (e.g., "0.000008"), need to convert to wei first
@@ -204,14 +244,31 @@ const saveTradeEvent = async (eventData, priceData) => {
                         // marketCap = totalSupply * priceInWei / 10^18 (to get result in wei)
                         const marketCap = (supply * priceInWei) / (10n ** 18n);
                         token.marketCap = marketCap.toString();
-                        console.log('✅ Token marketCap updated:', token.marketCap);
+                        // Calculate USD market cap
+                        if (ethPriceUSD !== '0') {
+                            try {
+                                const ethPrice = parseFloat(ethPriceUSD);
+                                if (ethPrice > 0) {
+                                    const marketCapInEth = Number(marketCap) / 1e18;
+                                    token.marketCapUSD = (marketCapInEth * ethPrice).toString();
+                                }
+                            }
+                            catch (err) {
+                                token.marketCapUSD = '0';
+                            }
+                        }
                     }
                     catch (err) {
-                        console.warn('⚠️ Could not calculate marketCap:', err);
+                        console.error('❌ Error calculating market cap:', {
+                            tokenAddress: token.address,
+                            chainId: chainId,
+                            error: err?.message || 'Unknown error',
+                            totalSupply: token.totalSupply,
+                            currentPrice: token.currentPrice
+                        });
                     }
                 }
                 await token.save();
-                console.log('✅ Token currentPrice updated:', token.currentPrice);
             }
             else {
                 // Even if price history exists, update Token's currentPrice if it's newer
@@ -219,6 +276,16 @@ const saveTradeEvent = async (eventData, priceData) => {
                     const validatedPrice = validatePrice(priceData.tokenPrice, 'in saveTradeEvent (existing history - trade)');
                     if (validatedPrice !== '0') {
                         token.currentPrice = validatedPrice;
+                        // Calculate USD price
+                        try {
+                            const ethPrice = parseFloat(ethPriceUSD);
+                            if (ethPrice > 0) {
+                                token.currentPriceUSD = (parseFloat(validatedPrice) * ethPrice).toString();
+                            }
+                        }
+                        catch (err) {
+                            token.currentPriceUSD = '0';
+                        }
                     }
                     // Calculate and update marketCap if totalSupply is available
                     // currentPrice is stored as decimal string (e.g., "0.000008"), need to convert to wei first
@@ -230,14 +297,24 @@ const saveTradeEvent = async (eventData, priceData) => {
                             // marketCap = totalSupply * priceInWei / 10^18 (to get result in wei)
                             const marketCap = (supply * priceInWei) / (10n ** 18n);
                             token.marketCap = marketCap.toString();
-                            console.log('✅ Token marketCap updated (from existing history):', token.marketCap);
+                            // Calculate USD market cap
+                            if (ethPriceUSD !== '0') {
+                                try {
+                                    const ethPrice = parseFloat(ethPriceUSD);
+                                    if (ethPrice > 0) {
+                                        const marketCapInEth = Number(marketCap) / 1e18;
+                                        token.marketCapUSD = (marketCapInEth * ethPrice).toString();
+                                    }
+                                }
+                                catch (err) {
+                                    token.marketCapUSD = '0';
+                                }
+                            }
                         }
                         catch (err) {
-                            console.warn('⚠️ Could not calculate marketCap:', err);
                         }
                     }
                     await token.save();
-                    console.log('✅ Token currentPrice updated (from existing history):', token.currentPrice);
                 }
             }
         }
@@ -274,10 +351,8 @@ const saveTradeEvent = async (eventData, priceData) => {
                         }
                     }
                     else {
-                        console.warn(`⚠️ Bonding curve holder not found for ${tokenAddress}, skipping update`);
                     }
                 }
-                console.log(`✅ Holders updated for TokenBought: buyer ${buyerAddress} +${tokenAmount}`);
             }
             else if (eventData.type === 'Sold') {
                 // Seller loses tokens, bonding curve gains tokens
@@ -302,7 +377,6 @@ const saveTradeEvent = async (eventData, priceData) => {
                         holderAddress: sellerAddress,
                         chainId: chainId
                     });
-                    console.log(`✅ Holder removed (balance = 0): ${sellerAddress}`);
                 }
                 // Update bonding curve holder (increase balance)
                 if (bondingCurveAddress) {
@@ -315,7 +389,6 @@ const saveTradeEvent = async (eventData, priceData) => {
                     const bondingCurveNewBalance = (bondingCurveCurrentBalance + BigInt(tokenAmount)).toString();
                     await updateOrCreateHolder(token._id, tokenAddress, bondingCurveAddress, bondingCurveNewBalance, eventData.txHash, chainId, !bondingCurveHolder);
                 }
-                console.log(`✅ Holders updated for TokenSold: seller ${sellerAddress} -${tokenAmount}`);
             }
             // Recalculate percentages for all holders
             await (0, exports.recalculatePercentages)(tokenAddress, token.totalSupply || '0', chainId);
@@ -336,7 +409,6 @@ const saveTradeEvent = async (eventData, priceData) => {
                 .lean();
         }
         catch (err) {
-            console.warn('⚠️ Could not fetch holders for WebSocket emission:', err);
         }
         // Transform holders to match frontend format
         const formattedHolders = (holders || []).map((holder) => ({
@@ -352,6 +424,7 @@ const saveTradeEvent = async (eventData, priceData) => {
         if (priceData && priceData.tokenPrice) {
             (0, updateEmitter_1.emitTokenPriceUpdate)(tokenAddress, {
                 price: String(tokenPrice),
+                priceUSD: token.currentPriceUSD || '0', // Include USD price for real-time updates
                 timestamp: priceData.timestamp || new Date(),
                 chainId: chainId,
             });
@@ -366,11 +439,6 @@ const saveTradeEvent = async (eventData, priceData) => {
             return;
         }
         if (eventData.type === 'Bought') {
-            console.log('🔍 Emitting tokenBought event:', {
-                tokenAddress,
-                txHash: eventData.txHash,
-                buyer: eventData.recipientAddress,
-            });
             (0, updateEmitter_1.emitTokenBought)({
                 tokenAddress: tokenAddress,
                 buyer: eventData.recipientAddress?.toLowerCase() || '',
@@ -387,11 +455,6 @@ const saveTradeEvent = async (eventData, priceData) => {
             });
         }
         else if (eventData.type === 'Sold') {
-            console.log('🔍 Emitting tokenSold event:', {
-                tokenAddress,
-                txHash: eventData.txHash,
-                seller: eventData.senderAddress,
-            });
             (0, updateEmitter_1.emitTokenSold)({
                 tokenAddress: tokenAddress,
                 seller: eventData.senderAddress?.toLowerCase() || '',
@@ -438,7 +501,6 @@ const saveCreatedEvent = async (eventData, priceData) => {
                 isActive: true,
             };
             token = await Token_1.default.create(tokenData);
-            console.log(`✅ Token saved from event:`, tokenData.address, `on chain ${chainId}`);
         }
         else {
             token = existingToken;
@@ -457,16 +519,37 @@ const saveCreatedEvent = async (eventData, priceData) => {
             if (token.isModified()) {
                 await token.save();
             }
-            console.log(`ℹ️ Token already exists:`, eventData?.address?.toLowerCase(), `on chain ${chainId}`);
         }
         // Update Token's currentPrice and marketCap (for display) but DON'T save to TokenHistory
         // Price history should only be saved on buy/sell events, not on token creation
         if (priceData && token) {
+            // Fetch ETH price for USD calculations
+            let ethPriceUSD = '0';
+            try {
+                ethPriceUSD = await (0, ethPriceService_1.getEthPriceUSD)();
+            }
+            catch (error) {
+                console.error('❌ Error fetching ETH price in saveCreatedEvent:', error.message);
+                // Continue with ETH-only values if USD calculation fails
+            }
             // Validate price before updating token
             const tokenPrice = String(priceData.tokenPrice || '0');
             const validatedPrice = validatePrice(tokenPrice, 'in saveCreatedEvent (initial price)');
             if (validatedPrice !== '0') {
                 token.currentPrice = validatedPrice;
+                // Calculate USD price
+                try {
+                    const ethPrice = parseFloat(ethPriceUSD);
+                    if (ethPrice > 0) {
+                        token.currentPriceUSD = (parseFloat(validatedPrice) * ethPrice).toString();
+                    }
+                    else {
+                        token.currentPriceUSD = '0';
+                    }
+                }
+                catch (err) {
+                    token.currentPriceUSD = '0';
+                }
                 // Calculate and update marketCap if totalSupply is available
                 if (token.totalSupply && token.currentPrice && token.currentPrice !== '0') {
                     try {
@@ -476,14 +559,30 @@ const saveCreatedEvent = async (eventData, priceData) => {
                         // marketCap = totalSupply * priceInWei / 10^18 (to get result in wei)
                         const marketCap = (supply * priceInWei) / (10n ** 18n);
                         token.marketCap = marketCap.toString();
-                        console.log('✅ Token marketCap set on creation:', token.marketCap);
+                        // Calculate USD market cap
+                        if (ethPriceUSD !== '0') {
+                            try {
+                                const ethPrice = parseFloat(ethPriceUSD);
+                                if (ethPrice > 0) {
+                                    const marketCapInEth = Number(marketCap) / 1e18;
+                                    token.marketCapUSD = (marketCapInEth * ethPrice).toString();
+                                }
+                                else {
+                                    token.marketCapUSD = '0';
+                                }
+                            }
+                            catch (err) {
+                                token.marketCapUSD = '0';
+                            }
+                        }
+                        else {
+                            token.marketCapUSD = '0';
+                        }
                     }
                     catch (err) {
-                        console.warn('⚠️ Could not calculate marketCap on creation:', err);
                     }
                 }
                 await token.save();
-                console.log('✅ Token currentPrice set on creation (no history saved):', token.currentPrice);
             }
             // Create initial holder record for bonding curve contract
             try {
@@ -510,7 +609,6 @@ const saveCreatedEvent = async (eventData, priceData) => {
                             transactionCount: 0,
                             chainId: chainId
                         });
-                        console.log(`✅ Initial bonding curve holder created: ${bondingCurveAddress} balance: ${totalSupply}`);
                     }
                     else {
                         // Update existing holder with totalSupply if it's higher
@@ -519,7 +617,6 @@ const saveCreatedEvent = async (eventData, priceData) => {
                         if (newBalance > existingBalance) {
                             existingBondingCurveHolder.balance = totalSupply;
                             await existingBondingCurveHolder.save();
-                            console.log(`✅ Bonding curve holder updated: ${bondingCurveAddress} balance: ${totalSupply}`);
                         }
                     }
                     // Recalculate percentages
@@ -542,7 +639,6 @@ const saveCreatedEvent = async (eventData, priceData) => {
                     .lean();
             }
             catch (err) {
-                console.warn('⚠️ Could not fetch holders for WebSocket emission:', err);
             }
             // Transform holders to match frontend format
             const formattedHolders = (holders || []).map((holder) => ({
@@ -581,7 +677,6 @@ const syncBlockRange = async (start, end, chainId) => {
         const chainContract = (0, blockchain_1.getContract)(chainId);
         const chainProvider = (0, blockchain_1.getProvider)(chainId);
         const chainContractAddress = (0, blockchain_1.getFactoryAddressForChain)(chainId);
-        console.log(`🔄 Syncing blocks ${start} → ${end} for chain ${chainId}`);
         const createdEvents = await chainContract.queryFilter(chainContract.filters.TokenCreated(), start, end);
         const boughtEvents = await chainContract.queryFilter(chainContract.filters.TokenBought(), start, end);
         const soldEvents = await chainContract.queryFilter(chainContract.filters.TokenSold(), start, end);
@@ -592,7 +687,16 @@ const syncBlockRange = async (start, end, chainId) => {
                 // Type assertion: events from queryFilter have args property
                 const decodedEvent = event;
                 if (!decodedEvent.args || !Array.isArray(decodedEvent.args)) {
-                    console.warn('Event args not available, skipping');
+                    continue;
+                }
+                // Validate array has enough elements (need at least 9 elements: 0-8)
+                if (decodedEvent.args.length < 9) {
+                    console.error('❌ Invalid event args length in TokenCreated event:', {
+                        chainId,
+                        argsLength: decodedEvent.args.length,
+                        expected: 9,
+                        txHash: decodedEvent.transactionHash
+                    });
                     continue;
                 }
                 const eventData = {
@@ -610,8 +714,33 @@ const syncBlockRange = async (start, end, chainId) => {
                 const timestamp = block?.timestamp;
                 // Fix: Use correct args indices for price calculation
                 // args[7] = virtualEthReserves, args[8] = virtualTokenReserves
-                const virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
-                const virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[8]);
+                // Validate values exist before BigInt conversion
+                if (decodedEvent.args[7] === undefined || decodedEvent.args[7] === null ||
+                    decodedEvent.args[8] === undefined || decodedEvent.args[8] === null) {
+                    console.error('❌ Missing virtual reserves in TokenCreated event:', {
+                        chainId,
+                        txHash: decodedEvent.transactionHash,
+                        args7: decodedEvent.args[7],
+                        args8: decodedEvent.args[8]
+                    });
+                    continue;
+                }
+                let virtualEthReserves;
+                let virtualTokenReserves;
+                try {
+                    virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                    virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[8]);
+                }
+                catch (error) {
+                    console.error('❌ Error converting virtual reserves to BigInt:', {
+                        chainId,
+                        txHash: decodedEvent.transactionHash,
+                        error: error.message,
+                        args7: decodedEvent.args[7],
+                        args8: decodedEvent.args[8]
+                    });
+                    continue;
+                }
                 const priceData = {
                     tokenAddress: decodedEvent.args[0],
                     tokenPrice: virtualTokenReserves > 0n
@@ -634,7 +763,16 @@ const syncBlockRange = async (start, end, chainId) => {
                 // Type assertion: events from queryFilter have args property
                 const decodedEvent = event;
                 if (!decodedEvent.args || !Array.isArray(decodedEvent.args)) {
-                    console.warn('Event args not available, skipping');
+                    continue;
+                }
+                // Validate array has enough elements (need at least 8 elements: 0-7)
+                if (decodedEvent.args.length < 8) {
+                    console.error('❌ Invalid event args length in TokenBought event:', {
+                        chainId,
+                        argsLength: decodedEvent.args.length,
+                        expected: 8,
+                        txHash: decodedEvent.transactionHash
+                    });
                     continue;
                 }
                 const block = await chainProvider.getBlock(decodedEvent.blockNumber);
@@ -642,8 +780,33 @@ const syncBlockRange = async (start, end, chainId) => {
                 const timestamp = block?.timestamp ? new Date(Number(block.timestamp) * 1000) : new Date();
                 // Calculate price: (newVirtualEthReserves * 1e18) / newVirtualTokenReserves
                 // args[6] = newVirtualEthReserves, args[7] = newVirtualTokenReserves
-                const virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[6]);
-                const virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                // Validate values exist before BigInt conversion
+                if (decodedEvent.args[6] === undefined || decodedEvent.args[6] === null ||
+                    decodedEvent.args[7] === undefined || decodedEvent.args[7] === null) {
+                    console.error('❌ Missing virtual reserves in TokenBought event:', {
+                        chainId,
+                        txHash: decodedEvent.transactionHash,
+                        args6: decodedEvent.args[6],
+                        args7: decodedEvent.args[7]
+                    });
+                    continue;
+                }
+                let virtualEthReserves;
+                let virtualTokenReserves;
+                try {
+                    virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[6]);
+                    virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                }
+                catch (error) {
+                    console.error('❌ Error converting virtual reserves to BigInt:', {
+                        chainId,
+                        txHash: decodedEvent.transactionHash,
+                        error: error.message,
+                        args6: decodedEvent.args[6],
+                        args7: decodedEvent.args[7]
+                    });
+                    continue;
+                }
                 let tokenPrice = '0';
                 if (virtualTokenReserves > 0n && virtualEthReserves > 0n) {
                     const priceInWei = (virtualEthReserves * 10n ** 18n) / virtualTokenReserves;
@@ -694,7 +857,16 @@ const syncBlockRange = async (start, end, chainId) => {
                 // Type assertion: events from queryFilter have args property
                 const decodedEvent = event;
                 if (!decodedEvent.args || !Array.isArray(decodedEvent.args)) {
-                    console.warn('Event args not available, skipping');
+                    continue;
+                }
+                // Validate array has enough elements (need at least 8 elements: 0-7)
+                if (decodedEvent.args.length < 8) {
+                    console.error('❌ Invalid event args length in TokenSold event:', {
+                        chainId,
+                        argsLength: decodedEvent.args.length,
+                        expected: 8,
+                        txHash: decodedEvent.transactionHash
+                    });
                     continue;
                 }
                 const block = await chainProvider.getBlock(decodedEvent.blockNumber);
@@ -702,8 +874,33 @@ const syncBlockRange = async (start, end, chainId) => {
                 const timestamp = block?.timestamp ? new Date(Number(block.timestamp) * 1000) : new Date();
                 // Calculate price: (newVirtualEthReserves * 1e18) / newVirtualTokenReserves
                 // args[6] = newVirtualEthReserves, args[7] = newVirtualTokenReserves
-                const virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[6]);
-                const virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                // Validate values exist before BigInt conversion
+                if (decodedEvent.args[6] === undefined || decodedEvent.args[6] === null ||
+                    decodedEvent.args[7] === undefined || decodedEvent.args[7] === null) {
+                    console.error('❌ Missing virtual reserves in TokenSold event:', {
+                        chainId,
+                        txHash: decodedEvent.transactionHash,
+                        args6: decodedEvent.args[6],
+                        args7: decodedEvent.args[7]
+                    });
+                    continue;
+                }
+                let virtualEthReserves;
+                let virtualTokenReserves;
+                try {
+                    virtualEthReserves = ethers_1.ethers.toBigInt(decodedEvent.args[6]);
+                    virtualTokenReserves = ethers_1.ethers.toBigInt(decodedEvent.args[7]);
+                }
+                catch (error) {
+                    console.error('❌ Error converting virtual reserves to BigInt:', {
+                        chainId,
+                        txHash: decodedEvent.transactionHash,
+                        error: error.message,
+                        args6: decodedEvent.args[6],
+                        args7: decodedEvent.args[7]
+                    });
+                    continue;
+                }
                 let tokenPrice = '0';
                 if (virtualTokenReserves > 0n && virtualEthReserves > 0n) {
                     const priceInWei = (virtualEthReserves * 10n ** 18n) / virtualTokenReserves;
@@ -754,8 +951,7 @@ const syncBlockRange = async (start, end, chainId) => {
 };
 exports.syncBlockRange = syncBlockRange;
 // Define a callback for when no events are found
-const handleNoEventsFound = (startBlock, endBlock) => {
-    console.log(`No events found in blocks ${startBlock} to ${endBlock}`);
+const handleNoEventsFound = (_startBlock, _endBlock) => {
 };
 /**
  * Call graduateTokenManually on the contract for a specific chain
@@ -775,7 +971,6 @@ async function graduateTokenManually(tokenAddress, chainId) {
             if (error.message?.includes('already liquidityAdded') ||
                 error.message?.includes('threshold not met') ||
                 error.message?.includes('not eligible')) {
-                console.log(`ℹ️ Token ${tokenAddress} on chain ${chainId} not eligible for graduation:`, error.message);
                 return;
             }
             throw error;
@@ -787,12 +982,9 @@ async function graduateTokenManually(tokenAddress, chainId) {
             maxFeePerGas: feeData.maxFeePerGas || undefined,
             maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || undefined,
         });
-        console.log(`✅ Graduation transaction sent for token ${tokenAddress} on chain ${chainId}`);
-        console.log(`   TX Hash: ${tx.hash}`);
         // Wait for transaction receipt asynchronously (don't block)
         tx.wait().then((receipt) => {
             if (receipt) {
-                console.log(`✅ Token ${tokenAddress} on chain ${chainId} graduated successfully. TX: ${tx.hash}`);
             }
         }).catch((error) => {
             console.error(`❌ Error waiting for graduation transaction ${tx.hash} on chain ${chainId}:`, error.message);
@@ -803,7 +995,6 @@ async function graduateTokenManually(tokenAddress, chainId) {
         if (error.message?.includes('already liquidityAdded') ||
             error.message?.includes('threshold not met') ||
             error.message?.includes('not eligible')) {
-            console.log(`ℹ️ Token ${tokenAddress} on chain ${chainId} not eligible for graduation:`, error.message);
         }
         else {
             // Re-throw unexpected errors
@@ -832,7 +1023,6 @@ const saveGraduationEvent = async (eventData) => {
             chainId: chainId
         });
         if (existingEvent) {
-            console.log(`⚠️ LiquidityEvent already exists for txHash: ${eventData.txHash}`);
             return;
         }
         // Lookup token to get tokenId
@@ -841,7 +1031,6 @@ const saveGraduationEvent = async (eventData) => {
             chainId: chainId
         });
         if (!token) {
-            console.warn(`⚠️ Token not found for graduation event: ${eventData.tokenAddress} on chain ${chainId}`);
             return;
         }
         // Get Uniswap router address from environment or use factory address as fallback
@@ -854,7 +1043,6 @@ const saveGraduationEvent = async (eventData) => {
                 graduationPrice = ethers_1.ethers.formatUnits(BigInt(eventData.graduationPrice.toString()), 18);
             }
             catch (err) {
-                console.warn('⚠️ Could not format graduation price:', err);
             }
         }
         // Create LiquidityEvent record
@@ -875,11 +1063,9 @@ const saveGraduationEvent = async (eventData) => {
             status: 'confirmed',
             methodName: 'TokenGraduated',
         });
-        console.log(`✅ LiquidityEvent created for graduated token: ${eventData.tokenAddress}`);
         // Update token's isActive status to false (token is no longer active on bonding curve)
         token.isActive = false;
         await token.save();
-        console.log(`✅ Token ${eventData.tokenAddress} marked as inactive (graduated)`);
     }
     catch (error) {
         console.error('❌ Error saving graduation event:', error.message);

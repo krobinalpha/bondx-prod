@@ -1,6 +1,0 @@
-import{j as t}from"./web3-vendor-COYj-tgc.js";import{L as e}from"./react-vendor-BTPJ9MfQ.js";import{c as s,L as o}from"./Layout-XKtbstTa.js";import{S as i}from"./SEO-B8zD07Wz.js";import"./index-i1UpOcxf.js";/**
- * @license lucide-react v0.407.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const r=s("Ban",[["circle",{cx:"12",cy:"12",r:"10",key:"1mglay"}],["path",{d:"m4.9 4.9 14.2 14.2",key:"1m5liu"}]]),c=()=>t.jsxs(o,{children:[t.jsx(i,{title:"404 - Not Found | BondX",description:"The page you're looking for doesn't exist or is still indexing."}),t.jsxs("div",{className:"flex flex-col items-center justify-start px-4 text-center pt-20 sm:pt-32 pb-10",children:[t.jsx(r,{className:"w-16 h-16 sm:w-20 sm:h-20 text-red-500 mb-3"}),t.jsx("h1",{className:"text-xl sm:text-2xl font-bold text-blue-400 mb-4",children:"Not Found"}),t.jsx("p",{className:"text-[10px] sm:text-xs text-gray-300 mb-5 max-w-xs sm:max-w-sm",children:"Wait and try again later. It seems like what you are looking for doesn't exist or is still indexing."}),t.jsx(e,{to:"/",children:t.jsx("button",{className:"bg-blue-500 hover:bg-blue-600 text-white text-xs sm:text-sm font-bold py-2 px-3 rounded transition duration-300",children:"Return Home"})})]})]});export{c as default};

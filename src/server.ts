@@ -11,7 +11,8 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { Server } from 'socket.io';
 import http from 'http';
-import { ErrorHandler } from './types';
+import { ErrorHandler, AuthRequest } from './types';
+import { optionalAuth } from './middleware/auth';
 
 // Import routes
 import tokenRoutes from './routes/tokens';
@@ -23,20 +24,14 @@ import authRoutes from './routes/auth';
 import uploadRoutes from './routes/upload';
 import analyticsRoutes from './routes/analytics';
 import chatRoutes from './routes/chat';
-// Debug/test routes - only in development
-let testSendGridRoutes: express.Router | null = null;
-let debugAuthRoutes: express.Router | null = null;
-
-if (process.env.NODE_ENV !== 'production') {
-  testSendGridRoutes = require('./routes/test-sendgrid').default;
-  debugAuthRoutes = require('./routes/debug-auth').default;
-}
 import tokenCreationRoutes from './routes/tokenCreation';
 import liquidityEventRoutes from './routes/liquidityEvents';
 import walletRoutes from './routes/wallet';
+import activitiesRoutes from './routes/activities';
 
 // Import sync job
 import { trackTrading } from './sync/track';
+import { startActivityMonitoring, stopActivityMonitoring } from './services/activityMonitor';
 
 dotenv.config();
 
@@ -138,19 +133,85 @@ const corsOptions: cors.CorsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Rate limiting - reasonable defaults for production
-const limiter = rateLimit({
+// Optional authentication - tries to authenticate but doesn't fail if no token
+// This allows rate limiting to differentiate between authenticated and anonymous users
+// Must run before rate limiting so req.user is available
+app.use('/api/', optionalAuth);
+
+// Rate limiting - tiered system for better scalability (1-10k users)
+// Authenticated users: 200 requests/10min (higher limit, tracked by user ID)
+// Anonymous users: 50 requests/10min (lower limit to prevent abuse, tracked by IP)
+const authenticatedLimiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '600000'), // 10 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000000'), // 100 requests per 10 minutes (much more reasonable)
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS_AUTH || '200'), // 200 requests per 10 minutes for authenticated users
   message: { error: 'Too many requests, please try again later.' },
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false, // Disable `X-RateLimit-*` headers
-  // Disable trust proxy validation to avoid ERR_ERL_PERMISSIVE_TRUST_PROXY
-  validate: {
-    trustProxy: false,
+  // Skip rate limiting for health checks and static assets
+  skip: (req) => {
+    return req.path === '/health' || req.path.startsWith('/static/');
+  },
+  // Use user ID for authenticated users to avoid shared IP issues
+  keyGenerator: (req) => {
+    const authReq = req as AuthRequest;
+    if (authReq.user?._id) {
+      return `user:${authReq.user._id.toString()}`;
+    }
+    // Fallback to IP if user ID not available (shouldn't happen with this limiter)
+    return req.ip || 'unknown';
   },
 });
-app.use('/api/', limiter);
+
+const anonymousLimiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '600000'), // 10 minutes
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS_ANON || '50'), // 50 requests per 10 minutes for anonymous users
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Skip rate limiting for health checks and static assets
+  skip: (req) => {
+    return req.path === '/health' || req.path.startsWith('/static/');
+  },
+  // Use IP address for anonymous users
+  keyGenerator: (req) => {
+    return req.ip || 'unknown';
+  },
+});
+
+// Apply rate limiting with authentication check
+// Routes that use authenticateToken or optionalAuth will have req.user set
+// Authenticated users get higher limits, anonymous users get lower limits
+app.use('/api/', (req: Request, res: Response, next: NextFunction) => {
+  const authReq = req as AuthRequest;
+  // Check if user is authenticated (has user object from authenticateToken or optionalAuth middleware)
+  if (authReq.user?._id) {
+    // User is authenticated - use higher limit (tracked by user ID)
+    authenticatedLimiter(req, res, next);
+  } else {
+    // User is anonymous - use lower limit (tracked by IP)
+    anonymousLimiter(req, res, next);
+  }
+});
+
+// Request timeout middleware - prevents hanging requests from consuming resources
+// Set timeout for all requests (60 seconds)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  // Set timeout for request (60 seconds)
+  req.setTimeout(60000, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ error: 'Request timeout' });
+    }
+  });
+  
+  // Set timeout for response (60 seconds)
+  res.setTimeout(60000, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ error: 'Response timeout' });
+    }
+  });
+  
+  next();
+});
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -206,15 +267,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/wallet', walletRoutes);
-// Debug/test routes - only in development
-if (process.env.NODE_ENV !== 'production') {
-  if (testSendGridRoutes) {
-    app.use('/api/test', testSendGridRoutes);
-  }
-  if (debugAuthRoutes) {
-    app.use('/api/debug', debugAuthRoutes);
-  }
-}
+app.use('/api/activities', activitiesRoutes);
 
 // Serve frontend for all non-API routes (SPA routing)
 app.get('*', (req: Request, res: Response): Response | void => {
@@ -264,6 +317,10 @@ const io = new Server(server, {
   // Add these for better connection handling
   allowUpgrades: true,
   perMessageDeflate: false,   // Disable compression to reduce overhead
+  // Connection limits for scalability (1-10k users)
+  maxHttpBufferSize: 1e6,     // Maximum message size: 1MB (prevents memory exhaustion)
+  // Note: Socket.io doesn't have a built-in max connections limit
+  // For production with 10k+ concurrent users, consider using Redis adapter for horizontal scaling
 });
 
 // Initialize Socket logic
@@ -294,14 +351,18 @@ const startServer = async (): Promise<void> => {
 
     // Start server
     server.listen(PORT, () => {
-      console.log(`🚀 BondX Backend Server running on port ${PORT}`);
-      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+      console.log(`✅ Server running on port ${PORT}`);
+      console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
     });
     
     // Start multi-chain tracking (will track all configured chains)
     // trackTrading() will automatically detect and track all chains with WebSocket URLs configured
     trackTrading();
+    
+    // Start activity monitoring for embedded wallets (deposit/withdraw tracking)
+    startActivityMonitoring().catch((error) => {
+      console.error('Error starting activity monitoring:', error);
+    });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
     process.exit(1);
@@ -312,7 +373,12 @@ startServer();
 
 // Graceful shutdown
 const shutdown = (): void => {
-  console.log('Shutting down gracefully...');
+  // Stop activity monitoring
+  try {
+    stopActivityMonitoring();
+  } catch (err) {
+    console.error('Error stopping activity monitoring:', err);
+  }
   
   // Clean up auth store intervals
   try {
@@ -324,7 +390,6 @@ const shutdown = (): void => {
   
   if (mongoose.connection.readyState === 1) {
     mongoose.connection.close(false).then(() => {
-      console.log('MongoDB connection closed');
       process.exit(0);
     }).catch((err) => {
       console.error('Error closing MongoDB connection:', err);

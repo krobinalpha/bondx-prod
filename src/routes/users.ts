@@ -1,6 +1,8 @@
 import express, { Request, Response } from 'express';
+import { body, validationResult } from 'express-validator';
 import User from '../models/User';
 import { authenticateToken } from '../middleware/auth';
+import { validateUsername } from '../middleware/validation';
 import { AuthRequest } from '../types';
 
 const router = express.Router();
@@ -62,7 +64,6 @@ router.get('/:address', async (req: Request, res: Response): Promise<Response | 
     if (!user.username || user.username.trim() === '') {
       user.username = await generateRandomUsername();
       await user.save();
-      console.log(`✅ Generated random username for user ${user._id}: ${user.username}`);
     }
 
     res.json({
@@ -89,8 +90,24 @@ router.get('/:address', async (req: Request, res: Response): Promise<Response | 
 });
 
 // PATCH /api/users/profile - Update user profile
-router.patch('/profile', authenticateToken, async (req: AuthRequest, res: Response): Promise<Response | void> => {
+router.patch('/profile', 
+  authenticateToken,
+  [
+    body('username').optional().trim().custom((value) => {
+      if (value !== undefined && !validateUsername(value)) {
+        throw new Error('Username must be 3-15 characters, alphanumeric and underscores only');
+      }
+      return true;
+    }),
+    body('bio').optional().trim().isLength({ max: 200 }).withMessage('Bio must not exceed 200 characters'),
+  ],
+  async (req: AuthRequest, res: Response): Promise<Response | void> => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const userId = req.user!._id.toString();
     const { username, bio, avatar, website, twitter, telegram, discord, github } = req.body;
 
@@ -116,7 +133,7 @@ router.patch('/profile', authenticateToken, async (req: AuthRequest, res: Respon
     }
 
     if (bio !== undefined) {
-      user.bio = bio.substring(0, 500); // Enforce max length
+      user.bio = bio.substring(0, 200); // Enforce max length
     }
 
     if (avatar !== undefined) {

@@ -52,6 +52,23 @@ const upload = (0, multer_1.default)({
         }
     }
 });
+// Configure multer for avatar uploads (images only, smaller size limit)
+const avatarUpload = (0, multer_1.default)({
+    storage: multer_1.default.memoryStorage(),
+    limits: {
+        fileSize: 2 * 1024 * 1024, // 2MB limit for avatars
+        files: 1
+    },
+    fileFilter: (_req, file, cb) => {
+        // Only allow image files for avatars
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        }
+        else {
+            cb(null, false);
+        }
+    }
+});
 // POST /api/upload/logo - Upload token logo (supports both images and videos)
 router.post('/logo', auth_1.authenticateToken, upload.single('file'), async (req, res) => {
     try {
@@ -131,10 +148,87 @@ router.post('/logo', auth_1.authenticateToken, upload.single('file'), async (req
         });
     }
 });
+// POST /api/upload/avatar - Upload user avatar
+router.post('/avatar', auth_1.authenticateToken, avatarUpload.single('file'), async (req, res) => {
+    try {
+        // Configure Cloudinary on each request to ensure env vars are loaded
+        if (!configureCloudinary()) {
+            return res.status(500).json({
+                error: 'Media upload service not configured',
+                details: 'Please check your Cloudinary environment variables (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)'
+            });
+        }
+        // Verify Cloudinary is actually configured by checking the config
+        const currentConfig = cloudinary_1.default.v2.config();
+        if (!currentConfig.cloud_name || !currentConfig.api_key || !currentConfig.api_secret) {
+            return res.status(500).json({
+                error: 'Media upload service configuration error',
+                details: 'Cloudinary credentials not properly set. Please restart the server after setting environment variables.'
+            });
+        }
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file provided' });
+        }
+        // Only images allowed for avatars
+        if (!req.file.mimetype.startsWith('image/')) {
+            return res.status(400).json({ error: 'File must be an image' });
+        }
+        // Convert buffer to base64
+        const base64Data = req.file.buffer.toString('base64');
+        const dataURI = `data:${req.file.mimetype};base64,${base64Data}`;
+        // Double-check configuration before upload
+        const config = cloudinary_1.default.v2.config();
+        if (!config.api_key || !config.api_secret) {
+            return res.status(500).json({
+                error: 'Cloudinary configuration error',
+                details: 'API credentials not properly configured'
+            });
+        }
+        // Upload to Cloudinary with avatar-specific transformations
+        const uploadOptions = {
+            folder: 'bondx/avatars',
+            resource_type: 'image',
+            transformation: [
+                { width: 400, height: 400, crop: 'fill', gravity: 'face' }, // Focus on face, square crop
+                { quality: 'auto:good' },
+                { format: 'auto' } // Auto format for best compression
+            ]
+        };
+        const result = await cloudinary_1.default.v2.uploader.upload(dataURI, uploadOptions);
+        res.json({
+            url: result.secure_url,
+            public_id: result.public_id,
+            width: result.width,
+            height: result.height,
+            format: result.format,
+            size: result.bytes,
+            resource_type: result.resource_type
+        });
+    }
+    catch (error) {
+        // Provide more detailed error information
+        if (error.http_code) {
+            return res.status(500).json({
+                error: 'Failed to upload avatar to cloud storage',
+                details: error.message,
+                http_code: error.http_code
+            });
+        }
+        res.status(500).json({
+            error: 'Failed to upload avatar',
+            details: error.message || 'Unknown error'
+        });
+    }
+});
 // Error handling middleware for multer
 router.use((error, _req, res, _next) => {
     if (error instanceof multer_1.default.MulterError) {
         if (error.code === 'LIMIT_FILE_SIZE') {
+            // Check if it's an avatar upload based on request path
+            const isAvatarUpload = _req.path?.includes('/avatar');
+            if (isAvatarUpload) {
+                return res.status(400).json({ error: 'File too large. Maximum size is 2MB for avatars.' });
+            }
             return res.status(400).json({ error: 'File too large. Maximum size is 50MB.' });
         }
         if (error.code === 'LIMIT_FILE_COUNT') {

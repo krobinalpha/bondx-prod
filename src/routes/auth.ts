@@ -1,6 +1,8 @@
 import express, { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { ethers } from 'ethers';
+import { SiweMessage } from 'siwe';
+import { OAuth2Client } from 'google-auth-library';
 import User from '../models/User';
 import crypto from 'crypto';
 import { sendEmail, generateVerificationEmail, generateVerificationEmailText } from '../services/emailService';
@@ -8,6 +10,13 @@ import { authenticateToken } from '../middleware/auth';
 import { AuthRequest } from '../types';
 
 const router = express.Router();
+
+// Initialize Google OAuth2 Client
+const googleOAuth2Client = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI || `${process.env.DOMAIN || 'http://localhost:5000'}/api/auth/social/google/callback`
+);
 
 // In-memory store for nonces and email codes (use Redis in production)
 const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
@@ -43,7 +52,6 @@ export const cleanupAuthStores = (): void => {
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
-    console.log('🧹 Auth store cleanup interval cleared');
   }
 };
 
@@ -127,14 +135,99 @@ router.post('/verify-wallet', async (req: Request, res: Response): Promise<Respo
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Verify signature
+    // Validate signature format (EIP-191: 0x + 130 hex characters = 132 total)
+    if (!signature.startsWith('0x') || signature.length !== 132) {
+      console.error('Invalid signature format received:', {
+        length: signature?.length,
+        startsWith0x: signature?.startsWith('0x'),
+        preview: signature?.substring(0, 50),
+        address: address
+      });
+      return res.status(400).json({ 
+        error: 'Invalid signature format',
+        details: process.env.NODE_ENV === 'development' 
+          ? `Expected 132 characters (0x + 130 hex), got ${signature?.length || 0}. The wallet may not support message signing correctly.` 
+          : undefined
+      });
+    }
+
+    // Verify signature using SIWE
     try {
-      const recoveredAddress = ethers.verifyMessage(message, signature);
-      if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
-        return res.status(401).json({ error: 'Invalid signature' });
+      // Parse the SIWE message
+      const siweMessage = new SiweMessage(message);
+      
+      // Get the expected domain - be more flexible with localhost
+      const requestHost = req.get('host') || '';
+      const expectedDomain = process.env.DOMAIN || requestHost;
+      
+      // For localhost, don't enforce strict domain matching
+      const isLocalhost = expectedDomain.includes('localhost') || 
+                         expectedDomain.includes('127.0.0.1') ||
+                         expectedDomain.includes('::1');
+      
+      // Verify the message and signature
+      // Don't pass domain for localhost to avoid strict matching issues
+      const verifyParams: any = {
+        signature: signature,
+      };
+      
+      // Only verify domain if not localhost (or if explicitly set in production)
+      if (!isLocalhost && expectedDomain) {
+        verifyParams.domain = expectedDomain;
       }
-    } catch (error) {
-      return res.status(401).json({ error: 'Signature verification failed' });
+      
+      const result = await siweMessage.verify(verifyParams);
+      
+      // Check if verification was successful
+      if (!result.success) {
+        console.error('SIWE verification failed:', {
+          error: result.error?.type,
+          expected: result.error?.expected,
+          received: result.error?.received,
+          address: address,
+          messageDomain: siweMessage.domain,
+          expectedDomain: expectedDomain,
+          isLocalhost: isLocalhost
+        });
+        return res.status(401).json({ 
+          error: 'Signature verification failed',
+          details: process.env.NODE_ENV === 'development' ? result.error?.type : undefined
+        });
+      }
+      
+      // Check if the recovered address matches the provided address
+      if (result.data.address.toLowerCase() !== address.toLowerCase()) {
+        console.error('Address mismatch:', {
+          recovered: result.data.address,
+          provided: address
+        });
+        return res.status(401).json({ error: 'Invalid signature: address mismatch' });
+      }
+      
+    } catch (error: any) {
+      // Better error logging - handle different error types
+      const errorDetails: any = {
+        errorType: error?.constructor?.name || typeof error,
+        messagePreview: typeof message === 'string' ? message.substring(0, 200) : 'Not a string'
+      };
+      
+      // Try to extract error information from different possible formats
+      if (error?.message) errorDetails.message = error.message;
+      if (error?.stack) errorDetails.stack = error.stack;
+      if (error?.toString) errorDetails.toString = error.toString();
+      if (error?.type) errorDetails.type = error.type;
+      if (error?.code) errorDetails.code = error.code;
+      
+      // Log the full error object for debugging
+      console.error('SIWE verification error:', errorDetails);
+      console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+      
+      return res.status(401).json({ 
+        error: 'Signature verification failed',
+        details: process.env.NODE_ENV === 'development' 
+          ? (errorDetails.message || errorDetails.toString || errorDetails.type || 'Unknown error') 
+          : undefined
+      });
     }
 
     // Find or create user
@@ -204,9 +297,6 @@ router.post('/send-email-code', async (req: Request, res: Response): Promise<Res
     const cleanCode = code.replace(/\D/g, '').trim();
     emailCodeStore.set(normalizedEmail, { code: cleanCode, expiresAt, attempts: 0 });
     
-    // Log for debugging (remove in production)
-    console.log(`📧 Verification code generated for ${normalizedEmail}: ${cleanCode} (expires in 10 minutes)`);
-    console.log(`   Stored in emailCodeStore with key: "${normalizedEmail}"`);
 
     // Send email with verification code
     try {
@@ -219,8 +309,6 @@ router.post('/send-email-code', async (req: Request, res: Response): Promise<Res
     } catch (emailError: any) {
       // If SendGrid is not configured, fall back to console log for development
       if (!process.env.SENDGRID_API_KEY || process.env.NODE_ENV === 'development') {
-        console.log(`[DEV MODE] Verification code for ${email}: ${code}`);
-        console.log('To enable email sending, configure SENDGRID_API_KEY and SENDGRID_FROM_EMAIL in your .env file');
       } else {
         // In production, if email fails, we should still return success to prevent email enumeration
         // but log the error for monitoring
@@ -290,17 +378,6 @@ router.post('/verify-email-code', async (req: Request, res: Response): Promise<R
     
     // Compare codes (both should be normalized 6-digit strings now)
     if (storedCodeStr !== normalizedCode) {
-      console.log(`❌ Code verification failed for ${normalizedEmail}:`, {
-        received: normalizedCode,
-        receivedType: typeof normalizedCode,
-        receivedLength: normalizedCode.length,
-        expected: storedCodeStr,
-        expectedType: typeof storedCodeStr,
-        expectedLength: storedCodeStr.length,
-        storedOriginal: stored.code,
-        attempts: stored.attempts,
-        timeRemaining: Math.floor((stored.expiresAt - Date.now()) / 1000) + ' seconds',
-      });
       return res.status(401).json({ 
         error: 'Invalid verification code',
         details: `Code does not match. Attempts remaining: ${5 - stored.attempts}`,
@@ -309,7 +386,6 @@ router.post('/verify-email-code', async (req: Request, res: Response): Promise<R
     }
 
     // Code verified successfully
-    console.log(`✅ Code verified successfully for ${normalizedEmail} (attempts: ${stored.attempts})`);
 
     // Code verified, find or create user
     let user = await User.findOne({ email: email.toLowerCase() });
@@ -352,6 +428,18 @@ router.post('/verify-email-code', async (req: Request, res: Response): Promise<R
       await user.addWalletAddress(embeddedWalletAddress, true);
       await user.verifyWallet(embeddedWalletAddress);
       await user.setPrimaryWallet(embeddedWalletAddress);
+      
+      // Add wallet to activity monitoring on all configured chains
+      const { addWalletToMonitoring } = await import('../services/activityMonitor');
+      const { getConfiguredChains } = await import('../config/blockchain');
+      const chains = getConfiguredChains();
+      
+      for (const chainId of chains) {
+        await addWalletToMonitoring(embeddedWalletAddress, chainId, user._id.toString()).catch(error => {
+          console.error(`Error adding wallet to monitoring on chain ${chainId}:`, error);
+          // Don't fail the request if monitoring fails
+        });
+      }
     } else {
       embeddedWalletAddress = primaryWalletAddress;
       
@@ -363,6 +451,20 @@ router.post('/verify-email-code', async (req: Request, res: Response): Promise<R
       if (primaryWalletObj && !primaryWalletObj.isSmartWallet) {
         primaryWalletObj.isSmartWallet = true;
         await user.save();
+      }
+      
+      // Ensure wallet is being monitored (might have been created before monitoring started)
+      const { addWalletToMonitoring } = await import('../services/activityMonitor');
+      const { getConfiguredChains } = await import('../config/blockchain');
+      const chains = getConfiguredChains();
+      
+      for (const chainId of chains) {
+        await addWalletToMonitoring(embeddedWalletAddress, chainId, user._id.toString()).catch(error => {
+          // Ignore errors (wallet might already be monitored)
+          if (!error.message?.includes('already being monitored')) {
+            console.error(`Error ensuring wallet monitoring on chain ${chainId}:`, error);
+          }
+        });
       }
     }
 
@@ -412,7 +514,6 @@ router.get('/me', async (req: Request, res: Response): Promise<Response | void> 
     if (!user.username || user.username.trim() === '') {
       user.username = await generateRandomUsername();
       await user.save();
-      console.log(`✅ Generated random username for user ${user._id}: ${user.username}`);
     }
 
     const primaryWalletAddress = user.walletAddresses.find((w: any) => w.isPrimary)?.address;
@@ -476,6 +577,18 @@ router.post('/smart-wallet', async (req: Request, res: Response): Promise<Respon
       await user.addWalletAddress(walletAddress, true);
       await user.verifyWallet(walletAddress);
       await user.setPrimaryWallet(walletAddress);
+      
+      // Add wallet to activity monitoring on all configured chains
+      const { addWalletToMonitoring } = await import('../services/activityMonitor');
+      const { getConfiguredChains } = await import('../config/blockchain');
+      const chains = getConfiguredChains();
+      
+      for (const chainId of chains) {
+        await addWalletToMonitoring(walletAddress, chainId, user._id.toString()).catch(error => {
+          console.error(`Error adding wallet to monitoring on chain ${chainId}:`, error);
+          // Don't fail the request if monitoring fails
+        });
+      }
     }
 
     res.json({
@@ -544,24 +657,39 @@ router.get('/embedded-wallet-address', authenticateToken, async (req: AuthReques
 router.post('/social/:provider', async (req: Request, res: Response): Promise<Response | void> => {
   try {
     const { provider } = req.params;
-    const { redirectUri: _redirectUri } = req.body;
+    const { redirectUri } = req.body;
 
-    const validProviders = ['google', 'twitter', 'discord', 'github', 'apple'];
+    const validProviders = ['google', 'apple'];
     if (!validProviders.includes(provider)) {
       return res.status(400).json({ error: 'Invalid provider' });
     }
 
-    // TODO: Implement OAuth flow for each provider
-    // For now, return a placeholder response
-    // In production, you'll need to:
-    // 1. Set up OAuth apps with each provider
-    // 2. Generate OAuth URLs
-    // 3. Handle callbacks
-    // 4. Create users and embedded wallets
+    if (provider === 'google') {
+      // Check if Google OAuth is configured
+      if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+        return res.status(500).json({ 
+          error: 'Google OAuth is not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.' 
+        });
+      }
 
+      // Generate OAuth URL
+      const frontendRedirectUri = redirectUri || process.env.DOMAIN || 'http://localhost:3000';
+      const scopes = ['profile', 'email'];
+      const authUrl = googleOAuth2Client.generateAuthUrl({
+        access_type: 'offline',
+        scope: scopes,
+        state: Buffer.from(JSON.stringify({ redirectUri: frontendRedirectUri })).toString('base64'),
+        prompt: 'consent',
+      });
+
+      return res.json({
+        redirectUrl: authUrl,
+      });
+    }
+
+    // For other providers (Apple, etc.) - return not implemented
     res.json({
       message: `Social login with ${provider} is not yet implemented. Please use email authentication for now.`,
-      // redirectUrl: `https://oauth.${provider}.com/authorize?...`, // Will be implemented
     });
   } catch (error) {
     console.error('Error initiating social login:', error);
@@ -573,16 +701,152 @@ router.post('/social/:provider', async (req: Request, res: Response): Promise<Re
 router.get('/social/:provider/callback', async (req: Request, res: Response): Promise<Response | void> => {
   try {
     const { provider } = req.params;
-    // const { code, state } = req.query; // Unused for now
+    const { code, state } = req.query;
 
-    // TODO: Implement OAuth callback handling
-    // 1. Exchange code for access token
-    // 2. Get user info from provider
-    // 3. Create or find user in database
-    // 4. Create embedded wallet
-    // 5. Generate JWT token
-    // 6. Redirect to frontend with token
+    if (provider === 'google') {
+      if (!code) {
+        return res.status(400).json({ error: 'Authorization code not provided' });
+      }
 
+      // Check if Google OAuth is configured
+      if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+        return res.status(500).json({ 
+          error: 'Google OAuth is not configured' 
+        });
+      }
+
+      // Exchange code for tokens
+      const { tokens } = await googleOAuth2Client.getToken(code as string);
+      googleOAuth2Client.setCredentials(tokens);
+
+      // Get user info from Google
+      const ticket = await googleOAuth2Client.verifyIdToken({
+        idToken: tokens.id_token!,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      
+      const payload = ticket.getPayload();
+      if (!payload) {
+        return res.status(400).json({ error: 'Failed to get user info from Google' });
+      }
+
+      const googleEmail = payload.email;
+      const googlePicture = payload.picture || '';
+
+      if (!googleEmail) {
+        return res.status(400).json({ error: 'Email not provided by Google' });
+      }
+
+      // Find or create user
+      let user = await User.findOne({ email: googleEmail.toLowerCase() });
+
+      if (!user) {
+        // Create new user with Google account
+        const username = await generateRandomUsername();
+        const tempPassword = crypto.randomBytes(32).toString('hex');
+
+        user = new User({
+          username,
+          email: googleEmail.toLowerCase(),
+          password: tempPassword,
+          avatar: googlePicture,
+        });
+        await user.save();
+      } else {
+        // Update avatar if user exists and doesn't have one
+        if (!user.avatar && googlePicture) {
+          user.avatar = googlePicture;
+          await user.save();
+        }
+      }
+
+      // Create or get embedded wallet for Google user
+      let embeddedWalletAddress: string | undefined;
+      const primaryWalletAddress = user.walletAddresses.find((w: any) => w.isPrimary)?.address;
+      
+      if (!primaryWalletAddress) {
+        // Generate deterministic private key from email + userId
+        const userId = user._id.toString();
+        const normalizedEmail = googleEmail.toLowerCase().trim();
+        const jwtSecret = process.env.JWT_SECRET || 'default-secret';
+        
+        // Generate seed string
+        const seed = `${userId}-${normalizedEmail}-${jwtSecret}`;
+        
+        // Generate private key using keccak256
+        const privateKey = ethers.keccak256(ethers.toUtf8Bytes(seed));
+        
+        // Create wallet from private key to get the address
+        const wallet = new ethers.Wallet(privateKey);
+        embeddedWalletAddress = wallet.address;
+        
+        // Add wallet to user (mark as smart wallet)
+        await user.addWalletAddress(embeddedWalletAddress, true);
+        await user.verifyWallet(embeddedWalletAddress);
+        await user.setPrimaryWallet(embeddedWalletAddress);
+        
+        // Add wallet to activity monitoring on all configured chains
+        const { addWalletToMonitoring } = await import('../services/activityMonitor');
+        const { getConfiguredChains } = await import('../config/blockchain');
+        const chains = getConfiguredChains();
+        
+        for (const chainId of chains) {
+          await addWalletToMonitoring(embeddedWalletAddress, chainId, user._id.toString()).catch(error => {
+            console.error(`Error adding wallet to monitoring on chain ${chainId}:`, error);
+            // Don't fail the request if monitoring fails
+          });
+        }
+      } else {
+        embeddedWalletAddress = primaryWalletAddress;
+        
+        // If user already has a primary wallet but it's not marked as smart wallet, mark it now
+        const primaryWalletObj = user.walletAddresses.find(
+          (w: any) => w.address.toLowerCase() === primaryWalletAddress.toLowerCase()
+        );
+        if (primaryWalletObj && !primaryWalletObj.isSmartWallet) {
+          primaryWalletObj.isSmartWallet = true;
+          await user.save();
+        }
+        
+        // Ensure wallet is being monitored (might have been created before monitoring started)
+        const { addWalletToMonitoring } = await import('../services/activityMonitor');
+        const { getConfiguredChains } = await import('../config/blockchain');
+        const chains = getConfiguredChains();
+        
+        for (const chainId of chains) {
+          await addWalletToMonitoring(embeddedWalletAddress, chainId, user._id.toString()).catch(error => {
+            // Ignore errors (wallet might already be monitored)
+            if (!error.message?.includes('already being monitored')) {
+              console.error(`Error ensuring wallet monitoring on chain ${chainId}:`, error);
+            }
+          });
+        }
+      }
+
+      // Generate JWT token
+      const token = generateToken(user._id.toString(), embeddedWalletAddress, googleEmail);
+
+      // Parse state to get frontend redirect URI
+      let frontendRedirectUri = process.env.DOMAIN || 'http://localhost:3000';
+      try {
+        if (state) {
+          const decodedState = JSON.parse(Buffer.from(state as string, 'base64').toString());
+          frontendRedirectUri = decodedState.redirectUri || frontendRedirectUri;
+        }
+      } catch (e) {
+        // Use default if state parsing fails
+      }
+
+      // Redirect to frontend with token
+      const redirectUrl = new URL(frontendRedirectUri);
+      redirectUrl.searchParams.set('token', token);
+      redirectUrl.searchParams.set('email', googleEmail);
+      redirectUrl.searchParams.set('provider', 'google');
+
+      return res.redirect(redirectUrl.toString());
+    }
+
+    // For other providers - return not implemented
     res.json({
       message: `OAuth callback for ${provider} is not yet implemented.`,
     });
