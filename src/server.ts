@@ -233,12 +233,17 @@ app.use(express.static(actualBuildPath, {
   etag: true, // Enable ETag for cache validation
   lastModified: true, // Enable Last-Modified header
   immutable: true, // Mark as immutable (won't change)
-  setHeaders: (res: Response, path: string) => {
+  setHeaders: (res: Response, filePath: string) => {
+    // Set correct MIME types for JavaScript modules (critical for module scripts)
+    if (filePath.endsWith('.js') || filePath.endsWith('.mjs')) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    }
+    
     // Add cache headers for different file types
-    if (path.endsWith('.html')) {
+    if (filePath.endsWith('.html')) {
       // HTML files should not be cached (for SPA routing)
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    } else if (path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
+    } else if (filePath.match(/\.(js|mjs|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|json|map)$/)) {
       // Static assets can be cached for 1 year
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
@@ -276,6 +281,18 @@ app.get('*', (req: Request, res: Response): Response | void => {
     return res.status(404).json({ error: 'Route not found' });
   }
   
+  // Don't serve index.html for static assets - return 404 instead
+  // This prevents MIME type errors when JS/CSS files are missing or not found
+  // The express.static middleware should handle these, but if a file doesn't exist,
+  // we don't want to return HTML (which causes "Expected a JavaScript module" error)
+  if (req.path.match(/\.(js|mjs|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|json|map|webp|avif)$/)) {
+    return res.status(404).json({ 
+      error: 'Static file not found', 
+      path: req.path,
+      message: 'The requested static file does not exist. Make sure the frontend is built correctly.'
+    });
+  }
+  
   // Check if index.html exists
   const indexPath = path.join(actualBuildPath, 'index.html');
   if (!fs.existsSync(indexPath)) {
@@ -286,7 +303,7 @@ app.get('*', (req: Request, res: Response): Response | void => {
     });
   }
   
-  // Serve index.html for SPA routing
+  // Serve index.html for SPA routing (only for non-static file requests)
   res.sendFile(indexPath);
 });
 
