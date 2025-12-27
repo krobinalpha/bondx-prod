@@ -1,7 +1,5 @@
 node_modules/
-dist/
 src/build/
-build/
 .env
 .env.local
 *.log
